@@ -1,0 +1,3126 @@
+---
+title: "Dissertation R Markdown"
+author: "Alexandre Dore"
+date: "2024-07-30"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+---
+
+# Settup and General Pre-Processing.
+```{r setup, include=FALSE}
+# Set working directory 
+knitr::opts_knit$set(root.dir = '~/Desktop/Dissertation/ALL data')
+```
+
+Load packages.
+```{r Packages}
+summary(cars)
+
+# Load packages
+library(DescTools)
+library(bfsMaps)
+library("sf")
+library(tidyverse)
+library("SMMT")
+library(xml2)
+library(fixest)
+library(gridExtra)
+library(corrplot)
+library(lmtest)
+library(orcutt)
+library(sandwich)
+
+```
+
+
+
+
+
+Load all data sets.
+```{r Loading data sets, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+# Load all data sets:
+
+# Load the nationality data for 2010 and 2021
+data_10<- read.csv("Dis 2010 data nationality csv.csv")
+data_21 <- read.csv("Dis 2021 data nationality csv.csv")
+
+# Load the referendum results data
+FaceBan <- read.csv("Face ban referendum relevant data.csv")
+Minaret <- read.csv("Minaret referendum relevant data.csv")
+
+
+# Load the covariates data, as well as that for sub-group analyses
+
+# Loading the population density data
+Pop_density_09 <- read.csv("clean 2009 pop-density.csv")
+Pop_density_20 <- read.csv("clean 2020 pop-density.csv")
+
+# Loading the social help data 
+Social_help_09 <- read.csv("clean 2009 social help.csv")
+Social_help_20 <- read.csv("clean 2020 social help.csv")
+
+# Loading the Income data
+Average_income_10 <- read.csv("clean 2010 income data.csv")
+Average_income_20 <- read.csv("clean 2020 income data.csv", 
+                              na.strings = c("", "NA", "#VALUE!")) 
+# Assign NAs to the missing values from the original data file
+
+# Loading the SVP support data
+SVP_support_07 <- read.csv("UDC parliament 2007.csv"
+                           , na.strings = c("", "NA", "#VALUE!")) # Assign NAs
+SVP_support_19 <- read.csv("UDC parliament 2019.csv")
+
+# Rename the columns to correct error made in the Excel data processing
+names(SVP_support_07)[names(SVP_support_07) == "SPD_votes_07"] <- "SVP_votes_07"
+names(SVP_support_19)[names(SVP_support_19) == "SPD_votes_19"] <- "SVP_votes_19"
+
+# Loading the district-level crime data 
+crime_20 <- read.csv("2020 dis crime actual dataset.csv")
+
+# Loading the linguistic regions data 
+Region_22<- read.csv("4 Linguisitic regions 2022 Dis.csv")
+
+# Loading the municipality type data
+Municipality_type_24<- read.csv("Municipality types.csv")
+```
+
+
+
+
+Investigate whether there are any NAs in the imported covariate data sets 
+(there are none in the outcome, demographic, crime, regional/municipality type ones)
+```{r NAs in the imported datasets}
+
+summary(Pop_density_09)
+summary(Pop_density_20)
+
+summary(Social_help_09)
+summary(Social_help_20)
+
+summary(Average_income_10)
+summary(Average_income_20)
+
+summary(SVP_support_07)
+summary(SVP_support_19)
+
+summary(crime_20)
+
+
+# There is around 30% NAs in the social help data sets, 75 in the
+# 2020 average income, and 57 and 3 in the 2007 and 2019 SVP supports, respectively
+
+# Given the consequent volume of NAs in the social help data sets, 
+# we do not consider imputation as it would likely not be representative of the
+# actual values.We decide to exclude these variables from the models as using 
+# them would imply cutting the data set size in half.
+
+# The SVP and income missing values will be imputed once the data has been 
+# updated to the 2024 boundaries, for higher similarity among the municipalities
+# used for imputation, considering municipality type
+
+```
+
+Load data for mapping tables (MT)
+**Below is an Important Comment for the Reader wanting to run the Code**
+```{r Load data for mapping tables (MT)}
+# Download and extract the 2024 municipality inventory form a defined online
+# source - this only needs to be done once, as the data is available locally afterwards
+# path_inventory_xml <- download_municipality_inventory(path = getwd()) 
+
+# Download the 2024 municipality inventory 
+Municipality_inventory_file <- read_xml("eCH0071_240101.xml")
+
+# import_CH_municipality_inventory imports the Swiss municipality inventory
+# from the raw XML resource into R as a tibble. 
+mutations_object <- import_CH_municipality_inventory(Municipality_inventory_file)
+mutations        <- mutations_object$mutations
+
+
+```
+
+
+
+
+Create all the relevant old and new states before creating the mapping tables.
+```{r Creating old and new states}
+
+
+# Create all the relevant old and new states before creating the mapping tables
+
+# The spatial reference (SR) of the nationality data, the 2024-01-01,
+# will form the new state of all other data sets as it is the latest in time, 
+# hence that with the least municipalities. 
+new_state_2024 <- as.Date("2024-01-01")
+
+# Define an old state for the 2022 spatial referenced data
+old_state_2022 <- as.Date("2022-05-01")
+
+# Vote data: Define 2009 and 2021 old states corresponding to the spatial references
+# of the referendum results.
+old_state_vote_2009 <- as.Date("2009-12-30") # Setting the SR a day earlier than FSO; 
+# there seems do be an issue otherwise, (removes 428 municipalities from "Minaret")
+old_state_vote_2021 <- as.Date("2021-01-01")
+
+# Non-vote covariates: Define 2009, 2010, and 2020 old states.
+old_state_cov2009 <- as.Date("2009-10-25")
+old_state_cov2010 <- as.Date("2010-11-21")
+old_state_cov2020 <- as.Date("2020-10-18")
+
+# SVP-covariates: Define 2007 and 2019 old states. 
+old_state_SVP2007 <- as.Date("2007-12-30") 
+# Again, setting 1 day earlier than 31/12 to avoid issues.
+old_state_SVP2019 <- as.Date("2019-01-01")
+
+```
+
+
+
+
+Create two MT-making functions. This is to account for the merger of municipalities forming Verzasca in 2020, not included in the "Swiss Municipal Data Merger Tool".
+```{r MT-making functions}
+
+
+
+# Set up the pre-2020 MT-making function
+clean_mapping_table_maker_pre_2020 <- function(mutations, old_state, new_state) {
+  # Create a mapping table
+  mapping_object <- map_old_to_new_state(mutations, old_state, new_state)
+  mapping_table <- mapping_object$mapped
+  
+  # Define lakes to be removed
+  lakes_to_remove <- c("Zürichsee (ZH)", "Zürichsee (SZ)", "Zürichsee (SG)", 
+                "Thunersee", "Brienzersee", "Bielersee (BE)", "Lac de Bienne (NE)",
+                "Lac de Neuchâtel (BE)", "Lac de Neuchâtel (FR)", 
+                "Lac de Neuchâtel (VD)", "Lac de Neuchâtel (NE)", "Baldeggersee", 
+                "Sempachersee", "Hallwilersee (LU)", "Hallwilersee (AG)",
+                "Zugersee (LU)", "Zugersee (SZ)", "Zugersee (ZG)", 
+                "Vierwaldstättersee (LU)", "Vierwaldstättersee (UR)", 
+                "Vierwaldstättersee (SZ)", "Vierwaldstättersee (OW)", 
+                "Vierwaldstättersee (NW)", "Sihlsee", "Sarnersee", "Walensee (GL)", 
+                "Walensee (SG)", "Aegerisee", "Lac de la Gruyère", "Murtensee (FR)", 
+                "Lac de Morat (VD)", "Bodensee (SH)", "Bodensee (SG)", "Bodensee (TG)", 
+                "Lago di Lugano (o.Camp.)", "Lago Maggiore", "Lac de Joux", 
+                "Lac Léman (VD)", "Lac Léman (VS)", "Lac Léman (GE)")
+  
+  # Remove the lakes from the mapping table
+  mapping_table <- mapping_table[!mapping_table$name_old %in% lakes_to_remove, ]
+  
+  # Handle the special case for the last lake with the same name as a municipality,
+  # as well as erroneous municipalities
+  mapping_table <- mapping_table[!mapping_table$bfs_nr_old %in% c(9040, 2391,
+                                                                  5391, 5394), ]
+  
+  # Remove the original Verzasca row (without valid old BFS numbers)
+  mapping_table <- mapping_table[!mapping_table$bfs_nr_new == 5399
+                                 | !is.na(mapping_table$bfs_nr_old), ]
+  
+  # Manually add the municipalities merging to form Verzasca in 2020
+  verzasca_mergers <- data.frame(
+    bfs_nr_new = rep(5399, 4),
+    name_new = rep("Verzasca", 4),
+    bfs_nr_old = c(5095, 5129, 5102, 5135),
+    name_old = c("Brione (Verzasca)", "Sonogno", "Corippo", "Vogorno")
+  )
+  
+  # Combine the manually added mergers with the existing mapping table
+  mapping_table <- rbind(mapping_table, verzasca_mergers)
+  
+  # Correct NA entries for unchanged municipalities whose "old data" is missing
+  na_indices <- which(is.na(mapping_table$bfs_nr_old))
+  mapping_table[na_indices, "bfs_nr_old"] <- mapping_table[na_indices, "bfs_nr_new"]
+  mapping_table[na_indices, "name_old"] <- mapping_table[na_indices, "name_new"]
+  
+  return(mapping_table)
+}
+
+
+
+
+
+# Set up the MT-making function for 2020 and after
+clean_mapping_table_maker_from_2020 <- function(mutations, old_state, new_state) {
+  # Create a mapping table
+  mapping_object <- map_old_to_new_state(mutations, old_state, new_state)
+  mapping_table <- mapping_object$mapped
+  
+  # Define lakes to be removed
+  lakes_to_remove <- c("Zürichsee (ZH)", "Zürichsee (SZ)", "Zürichsee (SG)", 
+                "Thunersee", "Brienzersee", "Bielersee (BE)", "Lac de Bienne (NE)",
+                "Lac de Neuchâtel (BE)", "Lac de Neuchâtel (FR)", 
+                "Lac de Neuchâtel (VD)", "Lac de Neuchâtel (NE)", "Baldeggersee", 
+                "Sempachersee", "Hallwilersee (LU)", "Hallwilersee (AG)",
+                "Zugersee (LU)", "Zugersee (SZ)", "Zugersee (ZG)", 
+                "Vierwaldstättersee (LU)", "Vierwaldstättersee (UR)", 
+                "Vierwaldstättersee (SZ)", "Vierwaldstättersee (OW)", 
+                "Vierwaldstättersee (NW)", "Sihlsee", "Sarnersee", "Walensee (GL)", 
+                "Walensee (SG)", "Aegerisee", "Lac de la Gruyère", "Murtensee (FR)", 
+                "Lac de Morat (VD)", "Bodensee (SH)", "Bodensee (SG)", "Bodensee (TG)", 
+                "Lago di Lugano (o.Camp.)", "Lago Maggiore", "Lac de Joux", 
+                "Lac Léman (VD)", "Lac Léman (VS)", "Lac Léman (GE)")
+  
+  # Remove the lakes from the mapping table
+  mapping_table <- mapping_table[!mapping_table$name_old %in% lakes_to_remove, ]
+  
+  # Handle the special case for the last lake with the same name as a municipality,
+  # as well as 3 erroneous municipalities
+  mapping_table <- mapping_table[!mapping_table$bfs_nr_old %in% c(9040, 2391, 
+                                                                  5391, 5394), ]
+  
+  # Correct NA entries for unchanged municipalities whose "old data" is missing
+  na_indices <- which(is.na(mapping_table$bfs_nr_old))
+  mapping_table[na_indices, "bfs_nr_old"] <- mapping_table[na_indices,
+                                                           "bfs_nr_new"]
+  mapping_table[na_indices, "name_old"] <- mapping_table[na_indices, "name_new"]
+  
+  return(mapping_table)
+}
+```
+
+
+
+
+Create all necessary MTs.
+```{r Creating the Mapping Tables, cache=TRUE}
+
+# MT to be used on the 2022 data
+mapping_table_2022 <- clean_mapping_table_maker_from_2020(mutations,
+                                                          old_state_2022,
+                                                          new_state_2024)
+
+# MT to be used on Minaret data
+mapping_table_vote2009 <- clean_mapping_table_maker_pre_2020(mutations,
+                                                             old_state_vote_2009,
+                                                             new_state_2024)
+
+# # MT to be used on Face Ban data
+mapping_table_vote2021 <- clean_mapping_table_maker_from_2020(mutations,
+                                                              old_state_vote_2021,
+                                                              new_state_2024)
+
+# MT for non-vote covariates
+
+# MT 2009 covariates
+mapping_table_cov2009 <- clean_mapping_table_maker_pre_2020(mutations,
+                                                            old_state_cov2009, 
+                                                            new_state_2024)
+
+# MT for 2010 covariates
+mapping_table_cov2010 <- clean_mapping_table_maker_pre_2020(mutations,
+                                                            old_state_cov2010, 
+                                                            new_state_2024)
+
+# MT for 2020 covariates
+mapping_table_cov2020 <- clean_mapping_table_maker_from_2020(mutations,
+                                                             old_state_cov2020,
+                                                             new_state_2024)
+
+# MT for SVP-covariates
+
+# MT for 2007 Parliamentary Election
+mapping_table_SVP2007 <- clean_mapping_table_maker_pre_2020(mutations,
+                                                            old_state_SVP2007, 
+                                                            new_state_2024)
+
+# MT for 2019 Parliamentary Election
+mapping_table_SVP2019 <- clean_mapping_table_maker_pre_2020(mutations, 
+                                                            old_state_SVP2019, 
+                                                            new_state_2024)
+
+
+# Investigate the presence of NAs in the MTs
+sum(is.na(mapping_table_2022))
+sum(is.na(mapping_table_vote2009))
+sum(is.na(mapping_table_vote2021))
+sum(is.na(mapping_table_cov2009))
+sum(is.na(mapping_table_cov2010))
+sum(is.na(mapping_table_SVP2007))
+sum(is.na(mapping_table_SVP2019))
+# No NA at all.
+```
+
+
+
+
+
+For relevant data sets, change the name of the Municipality_Number column to  bfs_nr_old in order to use the left_join and the MT:
+```{r Renaming Municipality Number Columns}
+# Nationality data:
+colnames(data_10)[colnames(data_10) == "bfs_nr_new"] <- "bfs_nr_old"
+colnames(data_21)[colnames(data_21) == "bfs_nr_new"] <- "bfs_nr_old"
+
+# Linguistic region data:
+colnames(Region_22)[colnames(Region_22) == "bfs_nr_new"] <- "bfs_nr_old"
+
+# Referendum results:
+colnames(Minaret)[colnames(Minaret) == "Municipality.number"] <- "bfs_nr_old"
+colnames(FaceBan)[colnames(FaceBan) == "Municipality.number"] <- "bfs_nr_old"
+
+# Population density
+colnames(Pop_density_09)[colnames(Pop_density_09) ==
+                           "Municipality_Number"] <- "bfs_nr_old"
+colnames(Pop_density_20)[colnames(Pop_density_20) ==
+                           "Municipality_Number"] <- "bfs_nr_old"
+
+# Social help
+colnames(Social_help_09)[colnames(Social_help_09) ==
+                           "Municipality_Number"] <- "bfs_nr_old"
+colnames(Social_help_20)[colnames(Social_help_20) ==
+                           "Municipality_Number"] <- "bfs_nr_old"
+
+# Income
+colnames(Average_income_10)[colnames(Average_income_10) ==
+                              "Municipality_Number"] <- "bfs_nr_old"
+colnames(Average_income_20)[colnames(Average_income_20) ==
+                              "Municipality_Number"] <- "bfs_nr_old"
+
+# No need to do anything for the SVP-vote data as this has been handled 
+# in Excel directly.
+
+```
+# End of Set Up Section
+
+
+From here on, specifics of data sets require we abandon the grouped approach. Each data set will be cleaned in turn, and its municipality borders updated to the SR of the nationality data (2024). For ease of navigation through the code, operations on each data set will be indexed.
+
+As it serves as base for the entire analysis, I start with the cleaning and formatting the nationality data:
+
+# Part 1: Cleaning and Formatting the Nationality Data
+## Part 1.1: Cleaning the 2021 Nationality Data
+```{r Cleaning the 2021 nationality data}
+
+
+# Remove unnecessary columns and rename the first two to more understandable titles
+data_21 <- subset(data_21, select = -c(X, X.2))
+colnames(data_21)[1] <- "Area"
+colnames(data_21)[2] <- "Area_Population_21"
+
+# Remove the second row from the data set because it only contains 0's
+data_21 <- data_21[-2, ]
+
+# Reset row names 
+rownames(data_21) <- NULL
+
+# Calculate total foreigners per area by summing up population of each nationality
+# except Switzerland (that is, all but the first three columns)
+data_21$total_foreigners_21 <- rowSums(data_21[,-(1:3)], na.rm = TRUE) 
+#2244181 foreigners. This matches official data.
+
+
+# Create a list of Arab countries
+arab_countries <- c("Algeria", "Bahrain", "Comoros", "Djibouti", "Egypt", "Iraq",
+                    "Jordan", "Kuwait", "Lebanon", "Libya", "Mauritania", 
+                    "Morocco", "Oman", "Palestine", "Qatar", "Saudi.Arabia",
+                    "Somalia", "Sudan", "Syria", "Tunisia", 
+                    "United.Arab.Emirates", "Yemen")
+
+# Create a list of Muslim (OIC member) 
+muslim_countries <- c("Afghanistan", "Albania", "Azerbaijan", "Bahrain", 
+                      "Bangladesh", "Benin", "United.Arab.Emirates", "Brunei",
+                       "Burkina.Faso", "Algeria", "Djibouti", "Chad", "Indonesia",
+                       "Morocco", "Côte.d.Ivoire", "Palestine", "Gabon", "Gambia",
+                       "Guinea", "Guinea.Bissau", "Guyana", "Iraq", "Iran", 
+                      "Cameroon", "Qatar", "Kazakhstan", "Kyrgyzstan", "Comoros", 
+                      "Kuwait", "Libya", "Lebanon", "Maldives", "Malaysia", 
+                      "Mali", "Egypt", "Mauritania", "Mozambique", "Niger",
+                      "Nigeria", "Uzbekistan", "Pakistan", "Senegal", 
+                      "Sierra.Leone", "Somalia", "Sudan", "Suriname", 
+                      "Syria", "Saudi.Arabia", "Tajikistan", "Togo", "Tunisia", 
+                       "Türkiye", "Turkmenistan", "Uganda", "Oman", "Jordan",
+                       "Yemen")
+
+
+Turkey <- "Türkiye"
+
+
+# Sum the number of nationals from each of the listed Arab countries 
+# listed for each municipality (row)
+data_21$Arab_Pop_21 <- rowSums(data_21[arab_countries], na.rm = TRUE)
+
+# Sum the number of nationals from each of the OIC member countries for each
+# municipality (row)
+data_21$Muslim_Pop_21 <- rowSums(data_21[muslim_countries], na.rm = TRUE)
+
+# Sum the number of nationals from Turkey
+data_21$Turkish_Pop_21 <- rowSums(data_21[Turkey], na.rm = TRUE)
+
+# Create a new data frame with only the relevant columns 
+data_21_clean <- data_21 %>%
+  select(Area, Area_Population_21, total_foreigners_21, Arab_Pop_21, Muslim_Pop_21 , 
+         Turkish_Pop_21)
+
+
+```
+
+
+
+
+## Part 1.2: Cleaning the 2010 Nationality Data 
+```{r Cleaning the 2010 nationality data }
+
+
+# Make column names identical between both nationality data sets
+colnames(data_10)[2] <- "Area_Population_10" 
+
+# Calculate total foreigners per area by summing up population of each 
+# nationality except Switzerland 
+data_10$total_foreigners_10 <- rowSums(data_10[,-(1:3)], na.rm = TRUE) 
+# 1766277 people, matches the official data. 
+
+# Sum the population for the Arab countries listed for each row
+data_10$Arab_Pop_10 <- rowSums(data_10[arab_countries], na.rm = TRUE)
+
+# Sum the population for the OIC member countries listed for each row
+data_10$Muslim_Pop_10 <- rowSums(data_10[muslim_countries], na.rm = TRUE)
+
+
+# Sum the number of nationals from Turkey
+data_10$Turkish_Pop_10 <- rowSums(data_10[Turkey], na.rm = TRUE)
+
+# Create a new data frame with relevant columns only
+data_10_clean <- data_10 %>%
+  select(Area, Area_Population_10, total_foreigners_10, Arab_Pop_10, Muslim_Pop_10
+         , Turkish_Pop_10)
+
+```
+
+
+
+
+## Part 1.3: Merging the 2021 and 2010 Nationality Data Frames by "Area" and Cleaning.
+```{r Merging the 2021 and 2010 nationality data frames by "Area" and cleaning.}
+
+merged_data <- full_join(data_21_clean, data_10_clean, by = "Area")
+
+# We then need to clean the merged data
+
+# Downloading the register of Swiss districts
+Swiss_Districts <- read.csv("District data .csv")
+
+# Removing the Swiss level data in the first row of merged_data
+merged_data <- subset(merged_data, Area != "Switzerland")
+
+# Resetting row names to start from 1
+rownames(merged_data) <- NULL
+
+# Create 'Canton' and 'District' columns
+merged_data <- merged_data %>%
+  mutate(Canton = ifelse(grepl("^-", Area), sub("^-\\s*", "", Area), NA_character_),
+         District = ifelse(grepl("^>>", Area), sub("^>>\\s*", "", Area), 
+                           NA_character_)) %>%
+  fill(Canton, .direction = "down") %>%
+  fill(District, .direction = "down") 
+
+# Reordering columns to have Canton 1st, District and, Area 3rd, then everything else
+merged_data <- merged_data %>%
+  select(Canton, District, Area, everything())
+
+# Removing the rows representing the 26 cantons in the Area column
+merged_data <- subset(merged_data, !grepl("^-\\s", merged_data$Area))
+
+# Checking the dimensions of the new dataset
+dim(merged_data) # All good, only the 26 cantons were removed. 
+
+# Removing the rows containing Swiss districts, i.e., 
+# those preceded by ">>" in the Area column
+merged_data <- subset(merged_data, !grepl("^>>", merged_data$Area))
+
+# Checking the dimensions of the new data set
+dim(merged_data) # Success, only the 143 districts were removed. 
+
+# Splitting municipality numbers and names into two columns
+merged_data <- separate(merged_data, Area, into = c("bfs_nr_old", 
+                                                    "Municipality_Name"),
+                        sep = " ", remove = FALSE)
+
+# Removing dots before the actual number in the new bfs_nr_old column
+merged_data$bfs_nr_old <- gsub("\\.+\\b", "", merged_data$bfs_nr_old)
+
+# Removing the Area column
+merged_data_final <- subset(merged_data, select = -Area)
+
+# Removing leading zeros from the bfs_nr_old column
+merged_data_final$bfs_nr_old <- gsub("^0+", "", merged_data_final$bfs_nr_old)
+
+# Checking the structure of the updated dataset
+str(merged_data_final)
+
+```
+# End of part 1 and the Nationality Data Cleaning
+
+
+
+
+# Part 2: Merge the district-level crime data with the nationality data
+```{r}
+
+merged_data_final$District <- trimws(merged_data_final$District)
+crime_20$District <- trimws(crime_20$District)
+
+
+
+# Ensure regex patterns are correctly applied
+
+# Round 1 
+merged_data_final <- merged_data_final %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|de\\s+|District\\s+|District\\sdu\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|Bezirk\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("See / District du Lac" = "See / Lac")))
+
+crime_20 <- crime_20 %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|District\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Kt.\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("Lavau0-Oron"= "Lavaux-Oron","Appenzell i.Rh." =  "Appenzell Innerrhoden")))  # typo correction
+
+
+# Round 2 
+merged_data_final <- merged_data_final %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|de\\s+|District\\s+|District\\sdu\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|Bezirk\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("See / District du Lac" = "See / Lac")))
+
+crime_20 <- crime_20 %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|District\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Kt.\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("Lavau0-Oron"= "Lavaux-Oron","Appenzell i.Rh." =  "Appenzell Innerrhoden")))  # typo correction
+
+# Round 3 
+merged_data_final <- merged_data_final %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|de\\s+|District\\s+|District\\sdu\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|Bezirk\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("See / District du Lac" = "See / Lac")))
+
+crime_20 <- crime_20 %>%
+  mutate(District = str_remove_all(District, "^(Bezirk\\s+|Kanton\\s+|District\\s+|Verwaltungskreis\\s+|Wahlkreis\\s+|Region\\s+|Kt.\\s+|Arrondissement\\sadministratif\\s+|Distretto\\sdi\\s+|d'|du\\s+|l')"),
+         District = str_replace_all(District, c("Lavau0-Oron"= "Lavaux-Oron","Appenzell i.Rh." =  "Appenzell Innerrhoden")))  # typo correction
+
+# Create a mapping vector to make all remaining non-matching district
+# match according to the crime_20 synthax
+replacements <- c("la Broye" = "La Broye", 
+                  "la Glâne" = "La Glâne", 
+                  "la Gruyère" = "La Gruyère",
+                  "la Sarine" = "La Sarine",
+                  "la Veveyse" = "La Veveyse",
+                  "Engiadina Bassa / Val Müstair" = "Engiadina Bassa/Val Müstair",
+                  "Prättigau / Davos" = "Prättigau/Davos",
+                  "la Broye-Vully" = "Broye-Vully",
+                  "la Riviera-Pays-d'Enhaut" = "Riviera-Pays-d'Enhaut",
+                  "Canton de Neuchâtel" = "Cant. de Neuchâtel",
+                  "Canton de Genève" = "Cant. de Genève",
+                  "des Franches-Montagnes" = "Les Franches-Montagnes")
+
+# Correct district names
+merged_data_final$District <- recode(merged_data_final$District, !!!replacements)
+
+# Perform a left join to add crime rates to each municipality
+merged_data_final <- left_join(merged_data_final, crime_20, by = "District")
+
+# Check the first few rows of the updated dataset to confirm the join
+head(merged_data_final)
+
+# Check NAs
+sum(is.na(merged_data_final))
+# No NAs
+
+```
+# End part 2
+
+
+
+
+
+
+# Part 3: Add the linguistic regions of each municipality, merging by bfs_nr_old
+
+```{r Add the linguistic regions of each municipality, merging by bfs_nr_old}
+
+# Merge the data sets by 'bfs_nr_old'
+merged_data_final <- merge(x = Region_22[, c("bfs_nr_old", "Linguistic_region")], 
+                           y = merged_data_final, by = "bfs_nr_old", all.y = TRUE)
+
+# Reordering columns to make 'Linguistic_region' the first column
+merged_data_final <- merged_data_final[c("Linguistic_region",
+                                         setdiff(names(merged_data_final), 
+                                                 "Linguistic_region"))]
+
+# View the top rows of the updated dataset and check NAs
+head(merged_data_final)
+sum(is.na(merged_data_final))
+# All good
+
+# For efficiency in the next step,rename crime variables
+colnames(merged_data_final)[colnames(merged_data_final)
+                            == "Total_property_related_crimes"] <-
+  "Property_related_crimes"
+colnames(merged_data_final)[colnames(merged_data_final) 
+                            == "Total_criminal_offenses"] <- 
+  "Tot_criminal_offenses"
+
+# Update merged_data_final to the 2024 spatial reference and calculate 
+# population shares and percentages
+
+# Update merged_data_final using the 2024 MT:
+merged_data_final24 <- left_join(mapping_table_2022, merged_data_final,
+                                 by = "bfs_nr_old") %>%
+  group_by(bfs_nr_new) %>%
+  summarise(
+    Linguistic_Region = first(Linguistic_region),# Preserve the first linguistic 
+    # region entry as all mergers are within such regions
+    District = first(District), # Similarly for districts
+    Canton = first(Canton),  # Similarly for canton
+    Total_Population_21 = sum(Area_Population_21, na.rm = TRUE),
+    Total_Foreigners_21 = sum(total_foreigners_21, na.rm = TRUE),
+    Total_Arab_Population_21 = sum(Arab_Pop_21, na.rm = TRUE),
+    Total_Muslim_Population_21 = sum(Muslim_Pop_21, na.rm = TRUE),
+    Total_Turkish_Population_21 = sum(Turkish_Pop_21, na.rm = TRUE),
+    Total_Population_10 = sum(Area_Population_10, na.rm = TRUE),
+    Total_Foreigners_10 = sum(total_foreigners_10, na.rm = TRUE),
+    Total_Arab_Population_10 = sum(Arab_Pop_10, na.rm = TRUE),
+    Total_Muslim_Population_10 = sum(Muslim_Pop_10, na.rm = TRUE),
+    Total_Turkish_Population_10 = sum(Turkish_Pop_10, na.rm = TRUE),
+    Violent_offences = first(Violent_offences), # Crime is at district level
+    Property_related_crimes = first(Property_related_crimes),# idem
+    Tot_criminal_offenses = first(Tot_criminal_offenses), # idem
+  ) %>%
+  mutate(
+    # Calculate shares for 2021
+    Tot_foreigner_share_21 = (Total_Foreigners_21 / Total_Population_21) * 100,
+    Arab_share_21 = (Total_Arab_Population_21 / Total_Population_21) * 100,
+    Muslim_share_21 = (Total_Muslim_Population_21 / Total_Population_21) * 100,
+    NM_Foreigner_share_21 = (Tot_foreigner_share_21 - Muslim_share_21),
+    MNA_share_21 = (Muslim_share_21 - Arab_share_21),
+    Turkish_share_21 = (Total_Turkish_Population_21 / Total_Population_21) * 100,
+    
+    # Calculate shares for 2010
+    Tot_foreigner_share_10 = (Total_Foreigners_10 / Total_Population_10) * 100,
+    Arab_share_10 = (Total_Arab_Population_10 / Total_Population_10) * 100,
+    Muslim_share_10 = (Total_Muslim_Population_10 / Total_Population_10) * 100,
+    NM_Foreigner_share_10 = (Tot_foreigner_share_10 - Muslim_share_10),
+    MNA_share_10 = (Muslim_share_10 - Arab_share_10),
+    Turkish_share_10 = (Total_Turkish_Population_10 / Total_Population_10) * 100,
+    
+    # Calculate changes between 2021 and 2010
+    Change_foreigners = Tot_foreigner_share_21 - Tot_foreigner_share_10,
+    Change_arabs = Arab_share_21 - Arab_share_10,
+    Change_Muslims = Muslim_share_21 - Muslim_share_10,
+    Change_NM_foreigners = NM_Foreigner_share_21 - NM_Foreigner_share_10,
+    Change_MNA = MNA_share_21 - MNA_share_10,
+    Change_turkish = Turkish_share_21 - Turkish_share_10
+  )%>%
+  select(-starts_with("Total_"), -Canton, -Tot_foreigner_share_21, -Arab_share_21, 
+         -Muslim_share_21, -NM_Foreigner_share_21, -MNA_share_21, 
+         -Tot_foreigner_share_10, Turkish_share_21)
+
+
+# Merge the above data set with the municipality types' data set
+merged_data_final24 <- left_join(merged_data_final24, Municipality_type_24, 
+                                 by = "bfs_nr_new")
+
+# Reorder the columns
+merged_data_final24 <- merged_data_final24 %>% 
+  select(bfs_nr_new, Municipality_name, Municipality_types, 
+         District, Cantonal_affiliation, Linguistic_Region, everything(), 
+         -c(Violent_offences, Property_related_crimes, Tot_criminal_offenses),
+         Violent_offences, Property_related_crimes, Tot_criminal_offenses)
+
+# Rename columns to easier names:
+colnames(merged_data_final24)[colnames(merged_data_final24) == 
+                                "Municipality_types"] <- "Municipality_type"
+colnames(merged_data_final24)[colnames(merged_data_final24) == 
+                                "Cantonal_affiliation"] <- "Canton"
+
+
+# Simplify the municipality type categories
+merged_data_final24 <- merged_data_final24 %>%
+  mutate(Municipality_type = case_when(
+    Municipality_type %in% c("Urban municipality of a large conurbation ", 
+                             "Urban community in a medium-sized conurbation ",
+                             "Small urban community or outside urban area ") ~ "Urban",
+    Municipality_type %in% c("Low-density suburban community ", 
+                             "Medium-density suburban community ",
+                             "High-density suburban community ") ~ "Semi-Urban",
+    Municipality_type %in% c("Centrally located rural municipality ", 
+                             "Municipality in a rural center ", 
+                             "Rural outskirts ") ~ "Rural"))
+
+# verify this worked:
+unique(merged_data_final24$Municipality_type)
+# All good.
+
+```
+
+# End part 3
+
+
+
+# Part 4: Cleaning and formatting the Referendum data:
+```{r Cleaning and formatting the Referendum data}
+
+# Removing the Swiss level data in the first row from both data sets
+Minaret <- subset(Minaret, Canton != " Suisse  ")
+FaceBan <- subset(FaceBan, Canton != "Suisse")
+
+# Resetting row names to start from 1
+rownames(Minaret) <- NULL
+rownames(FaceBan) <- NULL
+
+# Simultaneously cleaning and updating both data sets to 2024 boundaries, 
+# as well as calculating referendums' percentage of yes votes and participation rate:
+
+# Minaret:
+Minaret_updated <- left_join(mapping_table_vote2009, Minaret, by = "bfs_nr_old") %>% 
+  mutate(Yes_cleaned = as.numeric(gsub("[[:punct:][:space:]]", "", Yes)), 
+         # Convert 'Yes' column to numeric, remove punctuation
+         No_cleaned = as.numeric(gsub("[[:punct:][:space:]]", "", No)),
+         # Same process repeated
+         Registered.voters_cleaned = as.numeric(gsub("[[:punct:][:space:]]",
+                                                     "", Registered.voters)),   
+         Votes.received_cleaned = as.numeric(gsub("[[:punct:][:space:]]", "", 
+                                                  Votes.received))) %>%   
+  group_by(bfs_nr_new) %>% 
+  summarise(Minaret_yes = sum(Yes_cleaned, na.rm = TRUE), 
+            Minaret_no = sum(No_cleaned, na.rm = TRUE),
+            Minaret_registered_voters = sum(Registered.voters_cleaned, na.rm = TRUE),
+            Minaret_votes_received = sum(Votes.received_cleaned, na.rm = TRUE),
+            .groups = "drop") %>% 
+  mutate(Minaret_yes_percent = Minaret_yes / (Minaret_yes + Minaret_no) * 100,
+         Minaret_participation = (Minaret_votes_received / 
+                                    Minaret_registered_voters)*100)
+
+
+# Face ban:
+FaceBan_updated <- left_join(mapping_table_vote2021, FaceBan, by = "bfs_nr_old") %>% 
+  mutate(FaceBan_yes = as.numeric(gsub("[[:punct:][:space:]]", "", Yes)),  
+         # Convert 'Yes' column to numeric, remove punctuation
+         FaceBan_no = as.numeric(gsub("[[:punct:][:space:]]", "", No)), 
+         # Same process repeated
+         FaceBan_registered.voters = as.numeric(gsub("[[:punct:][:space:]]", "",
+                                                     Registered.voters)),  
+         FaceBan_votes.received = as.numeric(gsub("[[:punct:][:space:]]", "", 
+                                                  Votes.received))) %>% 
+  group_by(bfs_nr_new) %>%
+  summarise(FaceBan_yes = sum(FaceBan_yes, na.rm = TRUE), 
+            FaceBan_no = sum(FaceBan_no, na.rm = TRUE),
+            FaceBan_registered.voters = sum(FaceBan_registered.voters, na.rm = TRUE),
+            FaceBan_votes.received = sum(FaceBan_votes.received, na.rm = TRUE),
+            .groups = "drop") %>%    
+  mutate(FaceBan_yes_percent = FaceBan_yes / (FaceBan_yes + FaceBan_no) * 100,
+         FaceBan_participation = (FaceBan_votes.received /
+                                    FaceBan_registered.voters) * 100) 
+
+# We get the right number of municipalities for both the 2009 and 2021 data sets.
+
+
+# Investigate if there are any unexpected NAs in the updated data sets
+
+# Starting with the Minaret data
+sum(is.na(Minaret_updated)) # 12
+
+# Finding where they are
+Minaret_updated[is.na(Minaret_updated$bfs_nr_new), ] # 0
+Minaret_updated[is.na(Minaret_updated$Minaret_yes), ] # 0
+Minaret_updated[is.na(Minaret_updated$Minaret_no), ] # 0
+Minaret_updated[is.na(Minaret_updated$Minaret_registered_voters), ] #0
+Minaret_updated[is.na(Minaret_updated$Minaret_votes_received), ] # 0
+Minaret_updated[is.na(Minaret_updated$Minaret_yes_percent), ] # 6
+Minaret_updated[is.na(Minaret_updated$Minaret_participation), ] # 6
+# These are 6 municipalities, whose rows are filled with zeros and 2 NAs at the end
+
+# --> These 6 municipalities are all hamlets with between 50 and 500 citizens. 
+# We simply do not have data for them. 
+
+
+# Turning to the Face ban data
+sum(is.na(FaceBan_updated)) #8 
+
+# Investigating where they are.
+FaceBan_updated[is.na(FaceBan_updated$bfs_nr_new), ] # 0
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_yes), ] # 0
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_no), ] # 0
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_registered.voters), ] # 0
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_votes.received), ] # 0
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_yes_percent), ] # 4
+FaceBan_updated[is.na(FaceBan_updated$FaceBan_participation), ] # 4
+# Idem as above, representing 4/6 of the missing municipalities in the Minaret data
+
+
+# Merging the referendum data sets on bfs_nr_new
+Referendum_data <- merge(Minaret_updated, FaceBan_updated, by = "bfs_nr_new")
+
+# Calculate the change in support 
+Referendum_data$Yes_percent_change <- 
+  Referendum_data$FaceBan_yes_percent - Referendum_data$Minaret_yes_percent
+
+# Calculate the change in turnout 
+Referendum_data$Vote_turnout_change <- 
+  Referendum_data$FaceBan_participation - Referendum_data$Minaret_participation
+
+
+```
+# End of part 4.
+
+
+
+# Part 5: Formatting the population density data:
+```{r Formatting the population density data}
+
+# No additional cleaning is necessary for these data sets.
+
+# Updating the 2009 data:
+Pop_density_09_updated <- left_join(mapping_table_cov2009, 
+                                    Pop_density_09, by = "bfs_nr_old") %>% 
+  mutate(Total_population_cleaned = as.numeric(gsub("[[:punct:][:space:]]", "",
+                                                    Total_population))) %>%   
+  #Convert 'Total_population' column to numeric, remove punctuation
+  group_by(bfs_nr_new) %>% 
+  summarise(Total_pop_09 = sum(Total_population_cleaned, na.rm = TRUE),
+            # calculate the total pop for each "new" municipality
+            Municipality_area_09 = sum(Municipality_total_km2_area, na.rm = TRUE),
+            # calculate the area for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Population_density_09 = (Total_pop_09 / Municipality_area_09))
+
+
+# Updating the 2020 data:
+Pop_density_20_updated <- left_join(mapping_table_cov2020, Pop_density_20,
+                                    by = "bfs_nr_old") %>% 
+  mutate(Total_population_cleaned = as.numeric(gsub("[[:punct:][:space:]]", "",
+                                                    Total_population))) %>%   
+  #Convert 'Total_population' column to numeric, remove punctuation
+  group_by(bfs_nr_new) %>% 
+  summarise(Total_pop_20 = sum(Total_population_cleaned, na.rm = TRUE),
+            # calculate the total pop for each "new" municipality
+            Municipality_area_20 = sum(Municipality_total_km2_area, na.rm = TRUE),
+            # calculate the area for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Population_density_20 = (Total_pop_20 / Municipality_area_20))
+
+# We get 2145 municipalities, as desired. 
+
+
+# Investigating if there are any unexpected NAs in the updated data sets:
+
+# Starting with 2009:
+sum(is.na(Pop_density_09_updated$bfs_nr_new)) # 0
+sum(is.na(Pop_density_09_updated$Total_pop_09)) # 0
+sum(is.na(Pop_density_09_updated$Municipality_area_09)) # 0 
+sum(is.na(Pop_density_09_updated$Population_density_09)) # 0
+Pop_density_09_updated[is.na(Pop_density_09_updated$Population_density_09), ] # 0
+# None.
+
+# Turning to 2020:
+sum(is.na(Pop_density_20_updated$bfs_nr_new))
+sum(is.na(Pop_density_20_updated$Total_pop_20))
+sum(is.na(Pop_density_20_updated$Municipality_area_20))
+sum(is.na(Pop_density_20_updated$Population_density_20))
+# None again. This reflects the lack of NA in both the MTs and original data.
+
+
+# Merging the population density data sets on bfs_nr_new
+Pop_density_merged <- merge(Pop_density_09_updated, Pop_density_20_updated,
+                            by = "bfs_nr_new")
+
+# Calculating the change in population density
+Pop_density_merged$Pop_density_change <- Pop_density_merged$Population_density_20 - 
+  Pop_density_merged$Population_density_09
+
+# Converting population density to hundreds of persons/km² for easier 
+# interpretation of model coefficients
+Pop_density_merged$Population_density_09_in_hundreds <- 
+  Pop_density_merged$Population_density_09 / 100
+Pop_density_merged$Population_density_20_in_hundreds <- 
+  Pop_density_merged$Population_density_20 / 100
+
+# Calculating the change in population density in hundreds of persons/km²
+Pop_density_merged$Pop_density_change_in_hundreds <- 
+  Pop_density_merged$Population_density_20_in_hundreds - 
+  Pop_density_merged$Population_density_09_in_hundreds
+
+```
+# End of part 5
+
+
+
+# Part 6: Formatting the social help data:
+**This data was not included in the models and is removed from the final dataset in section 9**
+```{r Formatting the social help data}
+
+
+# To preserve the privacy of residents, the number of recipients 
+# is not available for very small municipalities. 
+# There, it is denoted by X. Accordingly, data cleaning is necessary prior to
+# updating to the 2024 municipality boundaries. 
+
+# For 2009: removing punctuation and spaces in "Number_of_recipients" and 
+# "Total_population" columns and converting data to numeric 
+# (from character initially). This automatically makes the 917 "X" and the 1 "-" NAs.
+Social_help_09$Number_of_recipients <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                            Social_help_09$Number_of_recipients))
+Social_help_09$Total_population <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                             Social_help_09$Total_population))
+
+# Checking if NAs are as expected.
+sum(is.na(Social_help_09$Number_of_recipients)) # 918 NAs = total number of X and -
+
+# Looking at the type of municipality for which we do not have access to data:
+mean(Social_help_09$Total_population[is.na(Social_help_09$Number_of_recipients)],
+     na.rm = TRUE) # 477.62 residents: the villages with X's are indeed very small.
+
+
+# For 2020, clean the data similarly 
+Social_help_20$Number_of_recipients <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                           Social_help_20$Number_of_recipients))
+Social_help_20$Total_population <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                              Social_help_20$Total_population))
+
+# Checking if NAs are as expected.
+sum(is.na(Social_help_20$Number_of_recipients)) # 510 NAs
+
+# Looking at NA municipality types.
+mean(Social_help_20$Total_population[is.na(Social_help_20$Number_of_recipients)],
+     na.rm = TRUE) # 575.2392: still very small municipalities, although
+# slightly larger. This could be because data in municipalities which have merged
+# is kept secret anymore. 
+# The lower number of municipalities gives this credence, especially since the
+# difference in NAs is approximates the number of mergers between periods.
+
+
+# Updating the 2009 data:
+Social_help_09_updated <- left_join(mapping_table_cov2009, Social_help_09,
+                                    by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(Total_population_09 = sum(Total_population, na.rm = TRUE),
+            # calculate the total pop for each "new" municipality
+            Number_of_recipients_09 = sum(Number_of_recipients, na.rm = TRUE),
+            # calculate the number of recipients for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Percent_social_help_09 = (Number_of_recipients_09 / Total_population_09)*100)
+
+
+# Updating the 2020 data:
+Social_help_20_updated <- left_join(mapping_table_cov2020, Social_help_20,
+                                    by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(Total_population_20 = sum(Total_population, na.rm = TRUE),
+            # calculate the total pop for each "new" municipality
+            Number_of_recipients_20 = sum(Number_of_recipients, na.rm = TRUE),
+            # calculate the number of recipients for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Percent_social_help_20 = (Number_of_recipients_20 / 
+                                     Total_population_20)*100)
+
+
+# We now know that some NAs are inadvertently transformed to zeros. 
+# We investigate their possible presence:
+sum(Social_help_09_updated$Number_of_recipients_09==0) 
+# The initial 918 NA municipalities translate to 578 (new) ones with zero recipient.
+sum(Social_help_09_updated$Percent_social_help_09==0) 
+# And thus, zero percent of social help in these municipalities.
+
+# We know these zeros are errors as no municipality had zero social help. 
+# Accordingly, we convert them back to NAs. 
+Social_help_09_updated <- Social_help_09_updated %>%
+  mutate(
+    Number_of_recipients_09 = if_else(Number_of_recipients_09 == 0, NA_real_,
+                                      Number_of_recipients_09),
+    Percent_social_help_09 = if_else(Percent_social_help_09 == 0, NA_real_,
+                                     Percent_social_help_09)
+  )
+
+# Safety checks
+Social_help_09_updated[is.na(Social_help_09_updated$Total_population_09), ] 
+# Did not change unwanted columns
+Social_help_09_updated[is.na(Social_help_09_updated$bfs_nr_new), ] 
+# Did not change unwanted columns
+sum(is.na(Social_help_09_updated$Number_of_recipients_09)) # 578
+sum(is.na(Social_help_09_updated$Percent_social_help_09)) # 578
+# Everything is in order.
+
+
+# Going through the same process for the 2020 data
+sum(Social_help_20_updated$Number_of_recipients_20==0) 
+# The initial 510 NA municipalities translate to 473
+sum(Social_help_20_updated$Percent_social_help_20==0) # idem.
+
+# Converting the zeros back to NAs. 
+Social_help_20_updated <- Social_help_20_updated %>%
+  mutate(
+    Number_of_recipients_20 = if_else(Number_of_recipients_20 == 0, NA_real_, 
+                                      Number_of_recipients_20),
+    Percent_social_help_20 = if_else(Percent_social_help_20 == 0, NA_real_, 
+                                     Percent_social_help_20)
+  )
+
+# Safety checks
+Social_help_20_updated[is.na(Social_help_20_updated$Total_population_20), ] # 0
+Social_help_20_updated[is.na(Social_help_20_updated$bfs_nr_new), ] # 0
+sum(is.na(Social_help_20_updated$Number_of_recipients_20)) # 473
+sum(is.na(Social_help_20_updated$Percent_social_help_20)) # 473
+# All good.
+
+
+# Merging the social help data sets on bfs_nr_new
+social_help_merged <- merge(Social_help_09_updated, Social_help_20_updated, 
+                            by = "bfs_nr_new")
+
+# Calculating the change in social help
+social_help_merged$Social_help_change <- social_help_merged$Percent_social_help_20 - 
+  social_help_merged$Percent_social_help_09
+
+```
+# End of part 6
+
+
+
+
+# Part 7: Formatting the average income per taxpayer data:
+```{r Formatting the average income per taxpayer data}
+
+# Some minor initial cleaning is necessary:
+
+# For some reason, the third 2010 column name has a period at the end; correcting it:
+colnames(Average_income_10)[colnames(Average_income_10) == 
+                              "Municipality_total_revenue."] <-
+  "Municipality_total_revenue"
+sum(is.na(Average_income_20$Number_of_taxpayers)) 
+# 75, remains minimal (will be identical for Municipality revenue)
+
+
+# Updating the 2010 data:
+Average_income_10_updated <- left_join(mapping_table_cov2010, 
+                                       Average_income_10, by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(Number_of_taxpayers_10 = sum(Number_of_taxpayers, 
+                                         na.rm = TRUE),
+            # calculate the number of taxpayers for each "new" municipality
+            Municipality_total_revenue_10 = sum(Municipality_total_revenue, 
+                                                na.rm = TRUE), 
+            # calculate the total revenue of taxpayers for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Average_net_income_10 = (Municipality_total_revenue_10 / 
+                                    Number_of_taxpayers_10))
+
+
+# Updating the 2020 data:
+Average_income_20_updated <- left_join(mapping_table_cov2020, 
+                                       Average_income_20, by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(Number_of_taxpayers_20 = sum(Number_of_taxpayers, na.rm = TRUE),
+            # calculate the number of taxpayers for each "new" municipality
+            Municipality_total_revenue_20 = sum(Municipality_total_revenue, 
+                                                na.rm = TRUE), 
+            # calculate the total revenue of taxpayers for each "new" municipality
+            .groups = "drop") %>% 
+  mutate(Average_net_income_20 = (Municipality_total_revenue_20 /
+                                    Number_of_taxpayers_20))
+
+
+
+# Investigate zeros and NAs - 2010
+sum(is.na(Average_income_10_updated)) 
+sum(Average_income_20_updated==0)
+# Nothing
+
+
+# Investigate zeros and NAs - 2020
+sum(is.na(Average_income_20_updated$bfs_nr_new)) # 0
+sum(is.na(Average_income_20_updated$Number_of_taxpayers_20)) # 0
+sum(Average_income_20_updated$Number_of_taxpayers_20==0) # 64 NAs transformed to 0
+sum(is.na(Average_income_20_updated$Municipality_total_revenue_20)) # 0
+sum(Average_income_20_updated$Municipality_total_revenue_20==0) # 64, idem
+sum(is.na(Average_income_20_updated$Average_net_income_20)) # 64
+
+# By precaution, we convert the zeros back to NAs:
+Average_income_20_updated <- Average_income_20_updated %>%
+  mutate(
+    Number_of_taxpayers_20 = if_else(Number_of_taxpayers_20 == 0, NA_real_,
+                                     Number_of_taxpayers_20),
+    Municipality_total_revenue_20 = if_else(Municipality_total_revenue_20 == 0,
+                                            NA_real_, Municipality_total_revenue_20)
+  )
+
+# Safety checks
+sum(is.na(Average_income_20_updated$Number_of_taxpayers_20)) # 64 
+sum(is.na(Average_income_20_updated$Municipality_total_revenue_20)) # 64 
+# Successful NA conversion
+
+
+# Merging the income data sets on bfs_nr_new
+income_merged <- merge(Average_income_10_updated, Average_income_20_updated,
+                       by = "bfs_nr_new")
+
+# Calculating the change in income 
+income_merged$income_change <- income_merged$Average_net_income_20 - 
+  income_merged$Average_net_income_10
+
+# Calculating the change in income in thousands as single francs 
+# are of reduced relecance as a unit of analysis.
+income_merged$income_change_thousands <- income_merged$income_change/1000
+
+```
+# End of part 7
+
+
+
+
+# Part 8: Formatting the SVP support data:
+```{r Formatting the SVP support data}
+
+# Some initial cleaning is required. 
+
+# Cleaning the 2007 data
+SVP_support_07$total_votes_07 <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                                 SVP_support_07$total_votes_07))
+SVP_support_07$SVP_votes_07 <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                               SVP_support_07$SVP_votes_07)) 
+# NAs where tacit vote or no candidate
+
+# Cleaning the 2019 data
+SVP_support_19$total_votes_19 <- as.numeric(gsub("[[:punct:][:space:]]", "",
+                                                 SVP_support_19$total_votes_19))
+
+
+# Updating the 2007 vote data:
+SVP_support_07_updated <- left_join(mapping_table_SVP2007, SVP_support_07,
+                                    by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(SVP_votes_07 = sum(SVP_votes_07, na.rm = TRUE),
+            # calculate the number of SVP votes in each "new" municipality
+            total_votes_07 = sum(total_votes_07, na.rm = TRUE), 
+            # calculate the total number of votes in each "new" municipality
+            .groups = "drop") %>% 
+  mutate(SVP_percent_07 = (SVP_votes_07 / total_votes_07)*100)
+
+
+# Updating the 2019 vote data:
+SVP_support_19_updated <- left_join(mapping_table_SVP2019, SVP_support_19,
+                                    by = "bfs_nr_old") %>% 
+  group_by(bfs_nr_new) %>% 
+  summarise(SVP_votes_19 = sum(SVP_votes_19, na.rm = TRUE),# idem
+            total_votes_19 = sum(total_votes_19, na.rm = TRUE), # idem
+            .groups = "drop") %>% 
+  mutate(SVP_percent_19 = (SVP_votes_19 / total_votes_19)*100)
+
+# 2145 municipalities, as expected.
+
+
+# Investigate zeros and NAs - 2007
+sum(is.na(SVP_support_07_updated)) 
+sum(SVP_support_07_updated==0) 
+
+# Looking into more detail
+sum(is.na(SVP_support_07_updated$bfs_nr_new)) # 0
+sum(is.na(SVP_support_07_updated$SVP_votes_07)) # 0
+sum(SVP_support_07_updated$SVP_votes_07==0) # 65  
+sum(SVP_support_07_updated$total_votes_07==0) # 18 < 58
+sum(is.na(SVP_support_07_updated$SVP_percent_07)) # 18
+# likely because no candidates/tacit votes are more common in small municipalities
+# and that these merged together, so there are now less municipalities with NAs 
+
+
+# Investigate zeros and NAs - 2019
+sum(is.na(SVP_support_19_updated)) 
+sum(SVP_support_19_updated==0) 
+
+# Looking into more detail
+sum(is.na(SVP_support_19_updated$bfs_nr_new)) # 0
+sum(is.na(SVP_support_19_updated$SVP_votes_19)) # 0
+sum(SVP_support_19_updated$total_votes_19==0) # 5
+sum(is.na(SVP_support_19_updated$SVP_percent_19)) # 5
+
+SVP_support_19_updated[is.na(SVP_support_19_updated$total_votes_19), ]
+SVP_support_19_updated[is.na(SVP_support_19_updated$SVP_percent_19), ]
+
+# Merging the SVP data sets on bfs_nr_new
+SVP_merged <- merge(SVP_support_07_updated, SVP_support_19_updated,
+                    by = "bfs_nr_new")
+
+# Calculating the change in SVP support 
+SVP_merged$SVP_change <- SVP_merged$SVP_percent_19 - SVP_merged$SVP_percent_07
+
+```
+# End of part 8
+
+
+
+
+All the data sets have now been formatted appropriately. We now combine them:
+
+# Part 9: Merging all data sets, imputing NAs, and removing unnecessary variables:
+**Merging the data sets**
+```{r Merging all data sets}
+
+
+# List of data sets to merge
+datasets_list <- list(merged_data_final24, Referendum_data, income_merged, 
+                      social_help_merged, Pop_density_merged, SVP_merged)
+
+# Use Reduce to merge all datasets on 'bfs_nr_new'
+final_merged <- Reduce(function(x, y) merge(x, y, by = "bfs_nr_new", 
+                                            all = TRUE), datasets_list)
+```
+
+**Imputing NAs**
+```{r Imputing NAs}
+# We impute the NAs to avoid losing information in 2020 income data
+hist(final_merged$Average_net_income_20)
+# The histogram is extremely skewed. To minimise the influence 
+# of outliers, we impute based on the median average income of municipalities 
+# of the same type and which are in the same canton, maximising similarities. 
+
+# Calculate median income for each combination of Municipality_type and Canton
+median_incomes_20 <- final_merged %>%
+  group_by(Municipality_type, Canton) %>%
+  summarise(Median_Income_20 = median(Average_net_income_20, na.rm = TRUE),
+            .groups = 'drop')
+
+# Join the median incomes back to the original dataset for 2020 data
+final_merged <- final_merged %>%
+  left_join(median_incomes_20, by = c("Municipality_type", "Canton"))
+
+# Impute missing Average_net_income_20 values using Median_Income_20
+final_merged <- final_merged %>%
+  mutate(Imputed_average_net_income_20 = ifelse(is.na(Average_net_income_20), 
+                                        Median_Income_20, Average_net_income_20))
+
+# Remove the Median_Income_20 column as no longer needed
+final_merged <- select(final_merged, -Median_Income_20)
+
+# Verify that the process worked: 
+sum(is.na(final_merged$Imputed_average_net_income_20)) # no NAs
+sum(is.na(final_merged$Average_net_income_20)) # The NAs are still there 
+# original average income column 
+
+
+
+# Calculating row-wise mean for average income between the 2 periods, in anticipation
+# of creating sub-group of municipalities with higher and lower incomes
+
+# First for the imputed data, then not imputed
+final_merged$Average_net_income_global <- 
+  rowMeans(final_merged[, c("Average_net_income_10", "Imputed_average_net_income_20")])
+
+final_merged$Average_net_income_global_no_impute <- 
+  rowMeans(final_merged[, c("Average_net_income_10", "Average_net_income_20")])
+
+# Calculate the median of the Average_net_income_global(s)
+median_income <- median(final_merged$Average_net_income_global)
+
+median_income_no_impute <- 
+  median(final_merged$Average_net_income_global_no_impute, na.rm = TRUE)
+
+# Recode into a binary variable
+final_merged$Income_Category <- ifelse(final_merged$Average_net_income_global > 
+                                         median_income, "rich", "poor")
+
+final_merged$Income_Category_no_impute <- 
+  ifelse(final_merged$Average_net_income_global_no_impute > 
+           median_income_no_impute, "rich", "poor")
+
+
+sum(is.na(final_merged$Income_Category_no_impute)) # 64
+sum(is.na(final_merged$Income_Category)) # 0
+# All good to continue
+
+
+
+
+
+
+# Similarly imputing for the SVP support data:
+hist(final_merged$SVP_percent_07)
+hist(final_merged$SVP_percent_19)
+# The distributions are more or less normal. We use mean imputation.
+
+
+# Calculate mean SVP support for each combination of Municipality_type and Canton
+means_SVP_07 <- final_merged %>%
+  group_by(Municipality_type, Canton) %>%
+  summarise(Mean_SVP_07 = mean(SVP_percent_07, na.rm = TRUE), .groups = 'drop')
+# All the municipalities in the Nidwald canton are NAs. After looking to impute 
+# those from its "sibling half-canton", Obwald, we find that there are only 7 
+# municipalities in Obwald. Accordingly, we impute cantonal means instead.
+
+# Calculate mean SVP support for each Canton. For Nidwald, use Obwald's data 
+final_merged <- final_merged %>%
+  group_by(Canton) %>%
+  mutate(
+    Mean_SVP_07 = mean(SVP_percent_07, na.rm = TRUE) 
+  ) %>%
+  ungroup()
+
+# Calculate Obwald's mean separately
+mean_SVP_Obwald <- mean(final_merged$SVP_percent_07[final_merged$Canton == "Obwald"])
+
+# Apply the Obwald mean to Nidwald 
+final_merged <- final_merged %>%
+  mutate(
+    Mean_SVP_07 = ifelse(Canton == "Nidwald" & is.na(Mean_SVP_07),
+                         mean_SVP_Obwald, Mean_SVP_07))
+
+
+# Create a new column for imputed SVP_percent_07 values
+final_merged <- final_merged %>%
+  mutate(
+    Imputed_SVP_percent_07 = ifelse(is.na(SVP_percent_07), Mean_SVP_07, SVP_percent_07)
+  )%>%
+  select(-Mean_SVP_07)  # Remove the temporary mean column after imputation
+
+# Verify that the process worked
+sum(is.na(final_merged$Imputed_SVP_percent_07))  # worked
+
+
+# Repeat cantonal mean imputation for the 2019 SVP support data (3NAs)
+final_merged <- final_merged %>%
+  group_by(Canton) %>%
+  mutate(
+    Mean_SVP_19 = mean(SVP_percent_19, na.rm = TRUE) 
+  ) %>%
+  ungroup()
+
+sum(is.na(final_merged$Mean_SVP_19))
+
+# Create a new column for imputed SVP_percent_19 values
+final_merged <- final_merged %>%
+  mutate(
+    Imputed_SVP_percent_19 = ifelse(is.na(SVP_percent_19), Mean_SVP_19, SVP_percent_19)
+  )%>%
+  select(-Mean_SVP_19)  # Remove the temporary mean column after imputation
+
+# Verify that the process worked
+sum(is.na(final_merged$Imputed_SVP_percent_19))
+
+# Re-calculate the change in SVP support account for imputations
+final_merged$SVP_change_imputed <- final_merged$Imputed_SVP_percent_19 - 
+  final_merged$Imputed_SVP_percent_07
+
+# Verify that no NA:
+sum(is.na(final_merged$SVP_change_imputed))
+```
+
+**Removing Unwanted Variables**
+```{r Removing unwanted variables}
+# Remove specified columns from final_merged
+final_merged <- select(final_merged, -c(Minaret_yes, Minaret_no, 
+                                        Minaret_registered_voters,
+                                        Minaret_votes_received, FaceBan_yes,
+                                        FaceBan_no, FaceBan_yes_percent,
+                                        FaceBan_participation, 
+                                        FaceBan_registered.voters,
+                                        FaceBan_votes.received,
+                                        Number_of_taxpayers_10,
+                                        Municipality_total_revenue_10, 
+                                        Number_of_taxpayers_20, 
+                                        Municipality_total_revenue_20, 
+                                        income_change, Total_population_09,
+                                        Number_of_recipients_09, 
+                                        Percent_social_help_09, 
+                                        Total_population_20, 
+                                        Number_of_recipients_20,
+                                        Percent_social_help_20, Social_help_change,
+                                        Total_pop_09, Municipality_area_09,
+                                        Population_density_09,
+                                        Total_pop_20, Municipality_area_20, 
+                                        Population_density_20, 
+                                        Population_density_09_in_hundreds,
+                                        Population_density_20_in_hundreds,
+                                        Pop_density_change, SVP_votes_07,
+                                        total_votes_07,SVP_votes_19, total_votes_19, 
+                                        SVP_percent_19, Average_net_income_10,
+                                        Average_net_income_20, Turkish_share_21,
+                                        SVP_percent_07, Average_net_income_global,
+                                        income_change_thousands, 
+                                        Average_net_income_global_no_impute, 
+                                        Imputed_SVP_percent_19
+                                        
+))
+
+
+sum(is.na(final_merged))
+# There are 106 NAs, likely corresponding to the 6 municipalities voting within
+# other ones, times the 4 vote variables (=24) + 18 NAs in the non-imputed SVP_change 
+# + 64 from the non-imputed Income categorical variable.
+
+# We remove the 6 municipalities with no outcome variable, considering they would
+# be automatically excluded from any model.
+
+# Identify rows with NAs except, in SVP_change (keeping them for robustness)
+rows_to_remove <- apply(final_merged, 1, function(row) {
+  # Check if there are any NAs in the row, excluding specified columns
+  any(is.na(row[-c(which(names(final_merged) %in% 
+                           c("SVP_change", "Income_Category_no_impute")))]))
+})
+
+
+
+
+# Subset the data to remove the identified rows
+final_merged <- final_merged[!rows_to_remove, ]
+
+# Check for remaining NAs to confirm
+sum(is.na(final_merged))
+
+# The 6 municipalities removed were also had NAs in the 2 other columns, removing
+# a total of 24 + 6 + 6 = 36 NAs. 
+# This is not surprising considering the reason why data sets lacked 
+# observations was inherently linked to municipalities' small size. 
+# We are left with 70 NAs to test if they have
+# any effect on estimates as part of robustness checks. Expectations are of 
+# minimal impact.
+
+
+```
+# End of part 9.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Part 10: Assessing Hypothesis H1 - Modelling for all Muslims
+
+## Part 10.1: Modelling for all Muslim
+
+
+
+**Set Up**
+```{r medians for the changes outside the "No Change" category}
+
+# Define thresholds for "No Change" as less than 0.05pp. variation in the shares
+no_change_lower_bound <- -0.05
+no_change_upper_bound <- 0.05
+
+# Calculate medians for the changes outside the "No Change" category
+negative_changes <- final_merged$Change_Muslims[final_merged$Change_Muslims < 
+                                                  no_change_lower_bound]
+positive_changes <- final_merged$Change_Muslims[final_merged$Change_Muslims > 
+                                                  no_change_upper_bound]
+
+median_negative_change <- median(negative_changes, na.rm = TRUE)
+median_positive_change <- median(positive_changes, na.rm = TRUE)
+
+
+# Recode the changes into a categorical variable
+final_merged <- final_merged %>%
+  mutate(Change_Muslim_Cat = case_when(
+    Change_Muslims < median_negative_change ~ "High Decrease",
+    Change_Muslims >= median_negative_change & Change_Muslims < 
+      no_change_lower_bound ~ "Low Decrease",
+    Change_Muslims >= no_change_lower_bound & Change_Muslims <= 
+      no_change_upper_bound ~ "No Change",
+    Change_Muslims > no_change_upper_bound & Change_Muslims <= 
+      median_positive_change ~ "Low Increase",
+    Change_Muslims > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor, set "No Change" as reference category, and reorder other levels
+final_merged$Change_Muslim_Cat <- factor(final_merged$Change_Muslim_Cat, 
+                                         levels = c("No Change", "High Increase",
+                                                    "Low Increase", "Low Decrease",
+                                                    "High Decrease"))
+```
+
+**Main Specification**
+```{r}
+# Main Specification
+FD_Muslims_Final2 <- lm(Yes_percent_change ~ Change_Muslim_Cat + Change_NM_foreigners + 
+                          SVP_change_imputed + Minaret_yes_percent
+                        + Muslim_share_10 + NM_Foreigner_share_10 + Violent_offences
+                        + Municipality_type + Income_Category, data = final_merged)
+
+summary(FD_Muslims_Final2)
+```
+Conclusion: larger increases reduce Islamophobia more, while only large decreases
+increase it. These results support H1.
+
+
+For comparison purposes, we also run a model with time-varying controls but no baseline, 
+and one with no time-varying controls nor baselines. In the code, these two models will hereafter
+be referred to as the 1st and 2nd "simplified models", respectively. Finally, 
+we include a vanilla model with only the change in Muslims as predictor.
+
+**1st Simplified Model: Time-Varying Controls but No Baselines **
+```{r 1st Simplified Model: Time-Varying Controls but No Baselines}
+
+FD_Muslims_Final2_simplified1 <- lm(Yes_percent_change ~ Change_Muslim_Cat + 
+                                      Change_NM_foreigners + SVP_change_imputed + 
+                                      Violent_offences + Municipality_type + 
+                                      Income_Category,
+                          data = final_merged)
+
+summary(FD_Muslims_Final2_simplified1)
+
+```
+Only high increases in Muslims are significant at the 5% level. There is considerably
+less significance than when including the baselines.
+
+**2nd Simplified Model: No Time-Varying Controls nor Baselines **
+```{r 2nd Simplified Model: No Time-Varying Controls nor Baselines}
+
+# No lagged model
+FD_Muslims_Final2_simplified2 <- lm(Yes_percent_change ~ Change_Muslim_Cat 
+                               + Violent_offences + Municipality_type
+                               + Income_Category,
+                          data = final_merged)
+
+summary(FD_Muslims_Final2_simplified2)
+
+```
+Only high increases in Muslims are significant at the 5% level. 
+Interestingly, while the coefficients are similar to the vanilla model, the p-values 
+are lower (for the change in Muslims).
+
+
+**Vanilla Model **
+```{r Vanilla Model}
+
+# No lagged model
+FD_Muslims_Vanilla <- lm(Yes_percent_change ~ Change_Muslim_Cat, 
+                         data = final_merged)
+
+summary(FD_Muslims_Vanilla)
+
+```
+All coefficients are positive and none is significant.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Part 10.2.2 - Assumptions, Model Diagnostics, and Robustness Checks:
+1) No autocorrelation 
+2) Multicollinearity
+3) Homoskedasticity 
+4) Models Without Imputation
+5) Models Without Outliers
+6) Tests for the linearity and normality assumptions are computed simultaneously for all models in section 12
+
+
+#### 1) Autocorrelation
+```{r}
+dwtest(FD_Muslims_Final2)
+dwtest(FD_Muslims_Final2_simplified1)
+dwtest(FD_Muslims_Final2_simplified2)
+dwtest(FD_Muslims_Vanilla)
+
+```
+All p-values are well below the 0.1% level. We reject the null hypothesis of no
+autocorrelation. There is positive autocorrelation (Analyttica Datalab, 2021) for 
+the all specifications (DW <2).This implies that the standard errors could be underestimated and variables considered
+significant when they are not.
+
+We correct for the above using the Cochrane-Orcutt procedure
+```{r}
+# Applying the Cochrane-Orcutt procedure to address autocorrelation (Rdocumentation)
+Corrected_FD_Muslims_Final2 <- cochrane.orcutt(FD_Muslims_Final2)
+Corrected_FD_Muslims_Final2_simplified1 <- cochrane.orcutt(FD_Muslims_Final2_simplified1)
+Corrected_FD_Muslims_Final2_simplified2 <- 
+  cochrane.orcutt(FD_Muslims_Final2_simplified2)
+Corrected_FD_Muslims_Vanilla <- cochrane.orcutt(FD_Muslims_Vanilla)
+
+# Summaries
+summary(Corrected_FD_Muslims_Final2)
+summary(Corrected_FD_Muslims_Final2_simplified1)
+summary(Corrected_FD_Muslims_Final2_simplified2)
+summary(Corrected_FD_Muslims_Vanilla)
+```
+ - For the main specification, significance of the primary variable of interests 
+ is unchanged, but the scale of th estimates is slightly reduced.
+ - While the "simplified" models have reduced standard errors, the reduction
+ is not sufficient to make the estimates s.s.. In fact, there is less significance. 
+ - The vanilla model remains insignificant, although coefficients for all but high
+ decreases have changed direction.
+ 
+
+
+
+#### 2) Multicollinearity
+
+```{r Multicollinearity}
+
+# For illustration purposes and high level insights, we create a confusion 
+# matrix for the numeric variables of the main specification
+
+# Subset the numeric variables 
+variables_of_interest <- c("Change_NM_foreigners", "Muslim_share_10", 
+                           "NM_Foreigner_share_10", "SVP_change_imputed", 
+                           "Minaret_yes_percent", "Violent_offences")  
+
+numeric_data <- final_merged[variables_of_interest]
+
+# Calculate the correlation matrix for these variables
+cor_matrix <- cor(numeric_data, use = "complete.obs")  
+
+testRes = cor.mtest(numeric_data, conf.level = 0.95)
+# Plot the Pearson correlation matrix, leave insignificant correlations blank
+corrplot(cor_matrix, method = 'number', order = 'hclust', p.mat = testRes$p, insig = 'blank')
+
+# There is moderate correlation between the NM foreigner and Muslim initial shares,
+# as well as between the minaret yet percent and violent offenses. Other correlations 
+# are weak.
+
+# VIF for more precise estimations
+VIF(FD_Muslims_Final2)
+VIF(FD_Muslims_Final2_simplified1)
+VIF(FD_Muslims_Final2_simplified2)
+
+# Multicollinearity is not problematic and does not require further investigation 
+# (below 4 for all variables)
+
+# Note 1: we test on the original non-corrected models due to the inability of 
+# the VIF function to deal with orcutt objects. However, the correlation between
+# predictors remains unchanged in both cases, since the variables are identical.
+
+# Note 2: there cannot be multicollinearity in the vanilla model given it has only 
+# one predictor variable. Accordingly, it is not tested.
+
+```
+
+
+
+#### 3) Homoskedasticity
+```{r Homoskedasticity}
+# Breusch-Pagan Test
+bptest(Corrected_FD_Muslims_Final2)
+bptest(Corrected_FD_Muslims_Final2_simplified1)
+bptest(Corrected_FD_Muslims_Final2_simplified2)
+bptest(Corrected_FD_Muslims_Vanilla)
+
+```
+- We fail to reject the null hypothesis of no heteroskedasticity for the vanilla model (p=0.19)
+
+- For all other models, the small p-values lead us to reject the H0 of no heteroscedasticity: variance is non-constant.
+
+While this does not affect the value of the estimated coefficients, it implies 
+the standard errors could  be imprecisely calculated, leading to falsely 
+significant p-values. 
+
+Because we are using wide format data and have already converted our model
+to account for autocorrelation, we cannot use functions coeftest and vcovHC, 
+which directly produce a summary using robust standard errors. This is because
+they require objects of class lm, not orcutt.
+
+**A WLS version, as well as a version with HC1 std. errors of the main specification (non-orcutt object) will nonetheless be computed in section 12 to estimate the impact of heteroskedasticity on our coefficients.**
+
+
+
+
+#### 4) Models without Imputation
+The only variables which were imputed are the change in SVP support and Municipality
+wealth status.
+
+
+```{r Main Specification Without Imputation}
+
+# Main Specification
+FD_Muslims_Final2_no_imput <- lm(Yes_percent_change ~ Change_Muslim_Cat + 
+                                   Change_NM_foreigners + 
+                          SVP_change + Minaret_yes_percent + Muslim_share_10 + 
+                        NM_Foreigner_share_10 + Violent_offences
+                        + Municipality_type + Income_Category_no_impute, 
+                        data = final_merged)
+dwtest(FD_Muslims_Final2_no_imput)
+Corrected_FD_Muslims_Final2_no_imput <- cochrane.orcutt(FD_Muslims_Final2_no_imput)
+summary(Corrected_FD_Muslims_Final2_no_imput)
+
+
+# Simplified Model 1: No Baseline Controls
+
+FD_Muslims_Final2_simplified1_no_imput <- lm(Yes_percent_change ~ 
+                                               Change_Muslim_Cat + 
+                                               Change_NM_foreigners + 
+                                               SVP_change + Violent_offences + 
+                                               Municipality_type + 
+                                               Income_Category_no_impute,
+                                             data = final_merged)
+dwtest(FD_Muslims_Final2_simplified1_no_imput)
+Corrected_FD_Muslims_Final2_simplified1_no_imput <- 
+  cochrane.orcutt(FD_Muslims_Final2_simplified1_no_imput)
+summary(Corrected_FD_Muslims_Final2_simplified1_no_imput)
+
+
+
+# Simplified Model 2: No Time-Varying nor Baseline Controls
+
+
+FD_Muslims_Final2_simplified2_no_imput <- lm(Yes_percent_change ~ Change_Muslim_Cat 
+                               + Violent_offences + Municipality_type
+                               + Income_Category_no_impute,
+                          data = final_merged)
+dwtest(FD_Muslims_Final2_simplified2_no_imput)
+Corrected_FD_Muslims_Final2_simplified2_no_imput <- 
+  cochrane.orcutt(FD_Muslims_Final2_simplified2_no_imput)
+summary(Corrected_FD_Muslims_Final2_simplified2_no_imput)
+
+
+# Vanilla model: the change in Muslim shares was not imputed
+
+```
+- For all models, any effect of the removal of imputed observations is small to the point it is 
+not perceptible. 
+
+
+
+
+
+
+
+#### 5) Models Without Outliers
+
+**Main Specification Without Outliers**
+```{r Main Model Without Outliers}
+# Calculating diagnostics
+hat_values_Final2 <- hatvalues(FD_Muslims_Final2)
+cooks_dist_Final2 <- cooks.distance(FD_Muslims_Final2)
+std_res_Final2 <- rstandard(FD_Muslims_Final2)
+
+# Identifying outliers, using standard thresholds
+high_leverage_Final2 <- which(hat_values_Final2 > 2 * mean(hat_values_Final2))
+high_cooks_Final2 <- which(cooks_dist_Final2 > 4/(nrow(final_merged)-
+                                                    length(coef(FD_Muslims_Final2))))
+high_std_res_Final2 <- which(abs(std_res_Final2) > 3)  
+outliers_Final2 <- unique(c(high_leverage_Final2, high_cooks_Final2, 
+                            high_std_res_Final2))
+
+
+# Refitting the model without outliers
+final_merged_no_outliers_main <- final_merged[-outliers_Final2, ]
+FD_Muslims_Final2_no_outliers <- lm(Yes_percent_change ~ Change_Muslim_Cat + 
+                                      Change_NM_foreigners + SVP_change_imputed + 
+                                      Minaret_yes_percent + Muslim_share_10 + 
+                                      NM_Foreigner_share_10 + Violent_offences + 
+                                      Municipality_type + Income_Category,
+                                    data = final_merged_no_outliers_main)
+
+dwtest(FD_Muslims_Final2_no_outliers)
+Corrected_FD_Muslims_Final2_no_outliers <- cochrane.orcutt(FD_Muslims_Final2_no_outliers)
+summary(Corrected_FD_Muslims_Final2_no_outliers)
+```
+The significance of the primary variable of interest changed noticeably, as well
+as the coefficients. Yet, these results do not imply that outliers must be removed, 
+as they are expected to be natural (see section 13). While the scale of the coefficients is reduced, 
+the results still support H1, whereby increases in the Muslim population decreases Islamophobia.
+Similarly, large decreases in Muslim shares are still associated with an increase in Islamophobia.
+
+**1st Simplified Model Without Outliers**
+```{r 1st Simplified Model Without Outliers}
+# Calculating diagnostics
+hat_values_simplified1 <- hatvalues(FD_Muslims_Final2_simplified1)
+cooks_dist_simplified1 <- cooks.distance(FD_Muslims_Final2_simplified1)
+std_res_simplified1 <- rstandard(FD_Muslims_Final2_simplified1)
+
+# Identifying outliers, using standard thresholds
+high_leverage_simplified1 <- which(hat_values_simplified1 > 2 * mean(hat_values_simplified1))
+high_cooks_simplified1 <- which(cooks_dist_simplified1 > 4/
+                             (nrow(final_merged)-
+                                length(coef(FD_Muslims_Final2_simplified1))))
+high_std_res_simplified1 <- which(abs(std_res_simplified1) > 3)  
+outliers_simplified1 <- unique(c(high_leverage_simplified1, 
+                            high_cooks_simplified1, high_std_res_simplified1))
+
+
+# Refitting the model without outliers
+final_merged_no_outliers_simplified1 <- final_merged[-outliers_simplified1, ]
+FD_Muslims_Final2_simplified1_no_outliers <- 
+  lm(Yes_percent_change ~ Change_Muslim_Cat + Change_NM_foreigners + 
+                                      SVP_change_imputed + Violent_offences + 
+                                      Municipality_type + Income_Category,
+                                    data = final_merged_no_outliers_simplified1)
+
+dwtest(FD_Muslims_Final2_simplified1_no_outliers)
+Corrected_FD_Muslims_Final2_simplified1_no_outliers <- 
+  cochrane.orcutt(FD_Muslims_Final2_simplified1_no_outliers)
+summary(Corrected_FD_Muslims_Final2_simplified1_no_outliers)
+
+```
+No meaningful difference after the removal of outliers. Still, note the now 
+negative coefficients for all levels of the change in Muslims, by opposition to small decreases having a positive coefficient initially.
+
+
+
+**2nd Simplified Model Without Outliers**
+```{r 2nd Simplified Model Without Outliers}
+# Calculating diagnostics
+hat_values_simplified2 <- hatvalues(FD_Muslims_Final2_simplified2)
+cooks_dist_simplified2 <- cooks.distance(FD_Muslims_Final2_simplified2)
+std_res_simplified2 <- rstandard(FD_Muslims_Final2_simplified2)
+
+# Identifying outliers, using standard thresholds
+high_leverage_simplified2 <- which(hat_values_simplified2 > 2 * mean(hat_values_simplified2))
+high_cooks_simplified2 <- which(cooks_dist_simplified2 > 4/
+                             (nrow(final_merged)-
+                                length(coef(FD_Muslims_Final2_simplified2))))
+high_std_res_simplified2 <- which(abs(std_res_simplified2) > 3)  
+outliers_simplified2 <- unique(c(high_leverage_simplified2, 
+                            high_cooks_simplified2, high_std_res_simplified2))
+
+
+# Refitting the model without outliers
+final_merged_no_outliers_simplified2 <- final_merged[-outliers_simplified2, ]
+FD_Muslims_Final2_simplified2_no_outliers <- 
+  lm(Yes_percent_change ~ Change_Muslim_Cat + Violent_offences + 
+                                      Municipality_type + Income_Category,
+                                    data = final_merged_no_outliers_simplified2)
+
+dwtest(FD_Muslims_Final2_simplified2_no_outliers)
+Corrected_FD_Muslims_Final2_simplified2_no_outliers <- 
+  cochrane.orcutt(FD_Muslims_Final2_simplified2_no_outliers)
+summary(Corrected_FD_Muslims_Final2_simplified2_no_outliers)
+
+```
+Significance levels are unchanged but the direction of the two levels for decreasing shares has inversed, and is now negative.
+
+
+**Vanilla Model**
+```{r Vanilla Model Without Outliers}
+# Calculating diagnostics
+hat_values_vanilla <- hatvalues(FD_Muslims_Vanilla)
+cooks_dist_vanilla <- cooks.distance(FD_Muslims_Vanilla)
+std_res_vanilla <- rstandard(FD_Muslims_Vanilla)
+
+# Identifying outliers, using standard thresholds
+high_leverage_vanilla <- which(hat_values_vanilla > 2 * mean(hat_values_vanilla))
+high_cooks_vanilla <- which(cooks_dist_vanilla > 4/
+                             (nrow(final_merged)-
+                                length(coef(FD_Muslims_Vanilla))))
+high_std_res_vanilla <- which(abs(std_res_vanilla) > 3)  
+outliers_vanilla <- unique(c(high_leverage_vanilla, 
+                            high_cooks_vanilla, high_std_res_vanilla))
+
+
+# Refitting the model without outliers
+final_merged_no_outliers_vanilla <- final_merged[-outliers_vanilla, ]
+FD_Muslims_vanilla_no_outliers <- lm(Yes_percent_change ~ Change_Muslim_Cat,
+                                    data = final_merged_no_outliers_vanilla)
+
+dwtest(FD_Muslims_vanilla_no_outliers)
+Corrected_FD_Muslims_vanilla_no_outliers <- 
+  cochrane.orcutt(FD_Muslims_vanilla_no_outliers)
+summary(Corrected_FD_Muslims_vanilla_no_outliers)
+
+```
+Significance levels are unchanged but the direction of the two levels for decreasing shares has inversed, and is now negative.
+
+# End of Part 10
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Part 11: Assessing Hypothesis H2: Arabs vs non-Arab Muslim Effects
+
+
+The Turkish represent 70% of the initial non-arab Muslim
+presence by themselves, and still a considerable share afterwards. Turkish immigration
+is not new in Switzerland, starting in the 1960s. Around 45% of all Turks are naturalized,
+compared to 11% for other Muslims. They represent the largest non-European
+foreigner group in Switzerland (Le Temps). There is a reasonable possibility  that the change in Turkish population could
+distort the effects for the entire MNA/NAM group. Accordingly, we investigate this with a third model controlling for the Turkish population. 
+
+
+## Part 11.1 - Set Up of All the Relevant Subsets
+
+```{r Part 11.1 - Set up Arab vs MNA}
+
+# 1) Set up for the Arab Model
+
+# We keep the same boundaries for the no change level.
+
+# Create the thresholds for the changes in shares
+negative_changes_arabs <- final_merged$Change_arabs[final_merged$Change_arabs < 
+                                                      no_change_lower_bound]
+positive_changes_arabs <- final_merged$Change_arabs[final_merged$Change_arabs > 
+                                                      no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_arabs, na.rm = TRUE)
+median_positive_change <- median(positive_changes_arabs, na.rm = TRUE)
+
+final_merged <- final_merged %>%
+  mutate(Change_Arabs_Cat2 = case_when(
+    Change_arabs < median_negative_change ~ "High Decrease",
+    Change_arabs >= median_negative_change & Change_arabs < no_change_lower_bound ~ 
+      "Low Decrease",
+    Change_arabs >= no_change_lower_bound & Change_arabs <= no_change_upper_bound ~ 
+      "No Change",
+    Change_arabs > no_change_upper_bound & Change_arabs <= median_positive_change ~ 
+      "Low Increase",
+    Change_arabs > median_positive_change ~ "High Increase"
+  ))
+
+final_merged$Change_Arabs_Cat2 <- factor(final_merged$Change_Arabs_Cat2, 
+                                         levels = c("No Change", "High Increase",
+                                                    "Low Increase", "Low Decrease",
+                                                    "High Decrease"))
+
+
+
+# 2) Set up for the MNA Model
+
+# Repeating the same process
+negative_changes_MNA <- final_merged$Change_MNA[final_merged$Change_MNA < 
+                                                  no_change_lower_bound]
+positive_changes_MNA <- final_merged$Change_MNA[final_merged$Change_MNA > 
+                                                  no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_MNA, na.rm = TRUE)
+median_positive_change <- median(positive_changes_MNA, na.rm = TRUE)
+
+final_merged <- final_merged %>%
+  mutate(Change_MNA_Cat2 = case_when(
+    Change_MNA < median_negative_change ~ "High Decrease",
+    Change_MNA >= median_negative_change & Change_MNA < no_change_lower_bound ~ 
+      "Low Decrease",
+    Change_MNA >= no_change_lower_bound & Change_MNA <= no_change_upper_bound ~ 
+      "No Change",
+    Change_MNA > no_change_upper_bound & Change_MNA <= median_positive_change ~ 
+      "Low Increase",
+    Change_MNA > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor,  set "No Change" as the reference category, reorder
+final_merged$Change_MNA_Cat2 <- factor(final_merged$Change_MNA_Cat2, 
+                                        levels = c("No Change", "High Increase",
+                                                   "Low Increase", "Low Decrease",
+                                                   "High Decrease"))
+
+
+
+
+# 3) Set up for the MNA without Turks Model
+
+# Create the necessary variables
+final_merged$Change_MNA_NO_TURKS <- final_merged$Change_MNA - 
+  final_merged$Change_turkish
+final_merged$MNA_NO_TURKS_share_10 <- final_merged$MNA_share_10 - 
+  final_merged$Turkish_share_10
+
+# Creating the level thresholds, as done above. 
+negative_changes_MNA_NO_TURKS <- 
+  final_merged$Change_MNA_NO_TURKS[final_merged$Change_MNA_NO_TURKS < 
+                                     no_change_lower_bound]
+positive_changes_MNA_NO_TURKS <- 
+  final_merged$Change_MNA_NO_TURKS[final_merged$Change_MNA_NO_TURKS > 
+                                     no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_MNA_NO_TURKS)
+median_positive_change <- median(positive_changes_MNA_NO_TURKS)
+
+
+# Re-code the MNA no Turk changes into a categorical variable with 5 categories
+final_merged <- final_merged %>%
+  mutate(Change_MNA_NO_TURKS_Cat = case_when(
+    Change_MNA_NO_TURKS < median_negative_change ~ "High Decrease",
+    Change_MNA_NO_TURKS >= median_negative_change & Change_MNA_NO_TURKS < 
+      no_change_lower_bound ~ "Low Decrease",
+    Change_MNA_NO_TURKS >= no_change_lower_bound & Change_MNA_NO_TURKS <= 
+      no_change_upper_bound ~ "No Change",
+    Change_MNA_NO_TURKS > no_change_upper_bound & Change_MNA_NO_TURKS <= 
+      median_positive_change ~ "Low Increase",
+    Change_MNA_NO_TURKS > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor,  set "No Change" as the reference category, reorder
+final_merged$Change_MNA_NO_TURKS_Cat <- factor(final_merged$Change_MNA_NO_TURKS_Cat, 
+                                      levels = c("No Change", "High Increase",
+                                                 "Low Increase", "Low Decrease",
+                                                 "High Decrease"))
+
+
+
+```
+
+
+
+
+
+
+
+
+
+## Part 11.2: Modelling
+
+The below models consist of the main specification applied to the 3 different Muslim sub-groups.
+
+**1. Model for Arabs**
+```{r Change_Arabs_Cat}
+
+
+FD_Arabs <- lm(Yes_percent_change ~ Change_Arabs_Cat2 + Change_MNA 
+                    + Change_NM_foreigners + SVP_change_imputed + Minaret_yes_percent
+                    + MNA_share_10 + Arab_share_10 + NM_Foreigner_share_10
+                    + Violent_offences + Municipality_type + Income_Category, 
+                      data = final_merged)
+# Original Output
+summary(FD_Arabs)
+dwtest(FD_Arabs)
+Corrected_FD_Arabs <- cochrane.orcutt(FD_Arabs)
+# Corrected Output
+summary(Corrected_FD_Arabs)
+```
+While the same pattern as for the full Muslim main specification applies for the increases - increasing Muslim shares decrease Islamophobia - the coefficients for decreasing shares are now insignificant.
+
+
+
+
+**2. Model for MNA**
+```{r Change_MNA_Cat}
+
+
+FD_MNA <- lm(Yes_percent_change ~ Change_MNA_Cat2 + Change_arabs 
+                 + Change_NM_foreigners + SVP_change_imputed
+                 + Minaret_yes_percent + MNA_share_10 + Arab_share_10
+                 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category, data = final_merged)
+# Original Output
+summary(FD_MNA)
+dwtest(FD_MNA)
+Corrected_FD_MNA <- cochrane.orcutt(FD_MNA)
+# Corrected Output
+summary(Corrected_FD_MNA)
+```
+The low decrease is s.s. at the 1% level.
+
+
+**3. Model for Non-Arab and non-Turkish Muslims**
+```{r MNA no Turks Magnitude}
+
+
+FD_MNA_NO_TURKS <- lm(Yes_percent_change ~ Change_MNA_NO_TURKS_Cat + Change_arabs 
+                 + Change_turkish + Change_NM_foreigners + SVP_change_imputed
+                 + Minaret_yes_percent + Turkish_share_10 + MNA_NO_TURKS_share_10
+                 + Arab_share_10 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category, data = final_merged)
+# Original Output
+summary(FD_MNA_NO_TURKS)
+dwtest(FD_MNA_NO_TURKS)
+Corrected_FD_MNA_NO_TURKS <- cochrane.orcutt(FD_MNA_NO_TURKS)
+# Corrected output
+summary(Corrected_FD_MNA_NO_TURKS)
+```
+Coefficients for increasing shares are the most significant and much larger than in any of the 2 alternative models. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Part 11.3 - Testing First-Difference Assumptions and Robustness Checks:
+1) No autocorrelation: all models have previously been showed to suffer from autocorrelation
+and already corrected
+2) Multicollinearity
+3) Homoskedasticity 
+4) Models Without Imputation
+5) Models Without Outliers
+6) Tests for the linearity and normality assumptions are computed simultaneously for all models in section 12
+
+#### 2) Multicollinearity
+For conciseness, only VIF tests are computed, considering correlation matrices as redundant.
+```{r Multicollinearity part 11}
+
+VIF(FD_Arabs)
+VIF(FD_MNA)
+VIF(FD_MNA_NO_TURKS)
+```
+Multicollinearity is not problematic in any of the models
+
+#### 3) Homoskedasticity - Breusch-Pagan Tests
+```{r Homoskedasticity part 11}
+
+bptest(FD_Arabs)
+bptest(FD_MNA)
+bptest(FD_MNA_NO_TURKS)
+
+```
+There is some degree of Heteroskedasticity in all models, considering all have 
+very significant p-values (reject H0 of no heteroskedasticity)
+
+#### 4) Models without Imputation
+```{r Sub-Models without Imputation 2}
+# Arabs
+FD_Arabs_no_impute <- lm(Yes_percent_change ~ Change_Arabs_Cat2 + Change_MNA 
+                    + Change_NM_foreigners + SVP_change + Minaret_yes_percent
+                    + MNA_share_10 + Arab_share_10 + NM_Foreigner_share_10
+                    + Violent_offences + Municipality_type + Income_Category_no_impute,
+                    data = final_merged)
+dwtest(FD_Arabs_no_impute)
+Corrected_Arabs_no_impute <- cochrane.orcutt(FD_Arabs_no_impute)
+summary(Corrected_Arabs_no_impute)
+
+# MNA
+FD_MNA_no_impute <- lm(Yes_percent_change ~ Change_MNA_Cat2 + Change_arabs 
+                 + Change_NM_foreigners + SVP_change
+                 + Minaret_yes_percent + MNA_share_10 + Arab_share_10
+                 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category_no_impute, data = final_merged)
+dwtest(FD_MNA_no_impute)
+Corrected_FD_MNA_no_impute <- cochrane.orcutt(FD_MNA_no_impute)
+summary(Corrected_FD_MNA_no_impute)
+
+# MNA No Turks
+FD_MNA_NO_TURKS_no_impute <- lm(Yes_percent_change ~ Change_MNA_NO_TURKS_Cat + Change_arabs 
+                 + Change_turkish + Change_NM_foreigners + SVP_change
+                 + Minaret_yes_percent + Turkish_share_10 + MNA_NO_TURKS_share_10
+                 + Arab_share_10 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category_no_impute, data = final_merged)
+dwtest(FD_MNA_NO_TURKS_no_impute)
+Corrected_FD_MNA_NO_TURKS_no_impute <- cochrane.orcutt(FD_MNA_NO_TURKS_no_impute)
+summary(Corrected_FD_MNA_NO_TURKS_no_impute)
+```
+- slightly reduced significance for the Arab model, but broadly similar.
+- only very minor changes in the (significant) estimates for the MNA/NAM model
+- only very minor changes in the (significant) estimates for the model excluding Turks  
+
+
+
+#### 5) Models without Outliers
+
+**Arabs**
+```{r Arabs}
+# Calculating diagnostics
+hat_values_Arabs <- hatvalues(FD_Arabs)
+cooks_dist_Arabs <- cooks.distance(FD_Arabs)
+std_res_Arabs <- rstandard(FD_Arabs)
+
+# Identifying outliers, using standard thresholds
+high_leverage_Arabs <- which(hat_values_Arabs > 2 * mean(hat_values_Arabs))
+high_cooks_Arabs <- which(cooks_dist_Arabs > 4/(nrow(final_merged)-length(coef(FD_Arabs))))
+high_std_res_Arabs <- which(abs(std_res_Arabs) > 3)  
+outliers_Arabs <- unique(c(high_leverage_Arabs, high_cooks_Arabs, high_std_res_Arabs))
+
+
+# Refitting the model without outliers
+Arabs_no_outliers <- final_merged[-outliers_Arabs, ]
+FD_Arabs_no_outliers <- lm(Yes_percent_change ~ Change_Arabs_Cat2 + Change_MNA 
+                    + Change_NM_foreigners + SVP_change + Minaret_yes_percent
+                    + MNA_share_10 + Arab_share_10 + NM_Foreigner_share_10
+                    + Violent_offences + Municipality_type + Income_Category,
+                    data = Arabs_no_outliers)
+dwtest(FD_Arabs_no_outliers)
+Corrected_Arabs_no_outliers <- cochrane.orcutt(FD_Arabs_no_outliers)
+summary(Corrected_Arabs_no_outliers)
+```
+Remarkably, the estimates for decreasing shares are no longer significant. Minor changes in those for increasing shares. 
+
+
+**MNA**
+```{r MNA}
+# Calculating diagnostics
+hat_values_MNA <- hatvalues(FD_MNA)
+cooks_dist_MNA <- cooks.distance(FD_MNA)
+std_res_MNA <- rstandard(FD_MNA)
+
+# Identifying outliers, using standard thresholds
+high_leverage_MNA <- which(hat_values_MNA > 2 * mean(hat_values_MNA))
+high_cooks_MNA <- which(cooks_dist_MNA > 4/
+                             (nrow(final_merged)-
+                                length(coef(FD_MNA))))
+high_std_res_MNA <- which(abs(std_res_MNA) > 3)  
+outliers_MNA <- unique(c(high_leverage_MNA, 
+                            high_cooks_MNA, high_std_res_MNA))
+
+
+# Refitting the model without outliers
+MNA_no_outliers <- final_merged[-outliers_MNA, ]
+FD_MNA_no_outliers <- lm(Yes_percent_change ~ Change_MNA_Cat2 + Change_arabs 
+                 + Change_NM_foreigners + SVP_change
+                 + Minaret_yes_percent + MNA_share_10 + Arab_share_10
+                 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category, data = MNA_no_outliers)
+dwtest(FD_MNA_no_outliers)
+Corrected_FD_MNA_no_outliers <- cochrane.orcutt(FD_MNA_no_outliers)
+summary(Corrected_FD_MNA_no_outliers)
+
+```
+No meaningful difference after the removal of outliers (very small reduction in estimate size for the single significant level). Still, note the now negative coefficients for all levels of the change in Muslims.
+
+
+
+**MNA No Turks**
+```{r MNA No Turks}
+# Calculating diagnostics
+hat_values_No_Turks <- hatvalues(FD_MNA_NO_TURKS)
+cooks_dist_No_Turks <- cooks.distance(FD_MNA_NO_TURKS)
+std_res_No_Turks <- rstandard(FD_MNA_NO_TURKS)
+
+# Identifying outliers, using standard thresholds
+high_leverage_No_Turks <- which(hat_values_No_Turks > 2 * mean(hat_values_No_Turks))
+high_cooks_No_Turks <- which(cooks_dist_No_Turks > 4/
+                             (nrow(final_merged)-
+                                length(coef(FD_MNA_NO_TURKS))))
+high_std_res_No_Turks <- which(abs(std_res_No_Turks) > 3)  
+outliers_No_Turks <- unique(c(high_leverage_No_Turks, 
+                            high_cooks_No_Turks, high_std_res_No_Turks))
+
+
+# Refitting the model without outliers
+No_Turks_no_outliers <- final_merged[-outliers_No_Turks, ]
+FD_MNA_NO_TURKS_no_outliers <- lm(Yes_percent_change ~ Change_MNA_NO_TURKS_Cat + Change_arabs 
+                 + Change_turkish + Change_NM_foreigners + SVP_change
+                 + Minaret_yes_percent + Turkish_share_10 + MNA_NO_TURKS_share_10
+                 + Arab_share_10 + NM_Foreigner_share_10 + Violent_offences
+                 + Municipality_type + Income_Category, data = No_Turks_no_outliers)
+dwtest(FD_MNA_NO_TURKS_no_outliers)
+Corrected_FD_MNA_NO_TURKS_no_outliers <- cochrane.orcutt(FD_MNA_NO_TURKS_no_outliers)
+summary(Corrected_FD_MNA_NO_TURKS_no_outliers)
+```
+The results are broadly unchanged. 
+
+# End of Part 11
+
+
+
+
+
+
+
+
+
+
+# Part 12: Remaining Appendix Content, Model Diagnostics, & Extra Content
+
+## 12.1 Descriptive Statistics
+Computed for all variables in our models and other relevant variables used to build these models. Missing values were already calculated at the start of the script. 
+```{r Descriptive Statistics}
+
+# Numerical variables - Referendum Results
+summary(final_merged$Minaret_yes_percent)
+sd(final_merged$Minaret_yes_percent, na.rm=TRUE)
+summary(final_merged$FaceBan_yes_percent)
+sd(final_merged$FaceBan_yes_percent, na.rm=TRUE)
+summary(final_merged$Yes_percent_change)
+sd(final_merged$Yes_percent_change, na.rm=TRUE)
+
+# Numerical variables - Changes in Demographics
+summary(final_merged$Change_arabs)
+sd(final_merged$Change_arabs, na.rm=TRUE)
+summary(final_merged$Change_MNA)
+sd(final_merged$Change_MNA, na.rm=TRUE)
+summary(final_merged$Change_MNA_NO_TURKS)
+sd(final_merged$Change_MNA_NO_TURKS, na.rm=TRUE)
+summary(final_merged$Change_NM_foreigners)
+sd(final_merged$Change_NM_foreigners, na.rm=TRUE)
+
+# Numerical variables - Initial Demographics
+summary(final_merged$Muslim_share_10)
+sd(final_merged$Muslim_share_10, na.rm=TRUE)
+summary(final_merged$Arab_share_10)
+sd(final_merged$Arab_share_10, na.rm=TRUE)
+summary(final_merged$MNA_share_10)
+sd(final_merged$MNA_share_10, na.rm=TRUE)
+summary(final_merged$MNA_NO_TURKS_share_10)
+sd(final_merged$MNA_NO_TURKS_share_10, na.rm=TRUE)
+summary(final_merged$NM_Foreigner_share_10)
+sd(final_merged$NM_Foreigner_share_10, na.rm=TRUE)
+
+# Categorical variables - Changes in Demographics
+summary(final_merged$Change_Muslim_Cat)
+summary(final_merged$Change_Arabs_Cat2)
+summary(final_merged$Change_MNA_Cat2)
+summary(final_merged$Change_MNA_NO_TURKS_Cat)
+
+# Covariates 
+summary(final_merged$SVP_change)
+sd(final_merged$SVP_change, na.rm=TRUE)
+summary(final_merged$Violent_offences)
+sd(final_merged$Violent_offences, na.rm=TRUE)
+table(final_merged$Municipality_type) 
+table(final_merged$Income_Category)
+summary(final_merged$SVP_percent_07)
+sd(final_merged$SVP_percent_07, na.rm=TRUE)
+summary(final_merged$Pop_density_change_in_hundreds)
+sd(final_merged$Pop_density_change_in_hundreds, na.rm=TRUE)
+
+
+
+# Bar charts for the classes of categorical variables
+p1 <- ggplot(final_merged, aes(x = Municipality_type)) + 
+  geom_bar() +
+  ggtitle("Municipality Type")
+
+p2 <- ggplot(final_merged, aes(x = Linguistic_Region)) + 
+  geom_bar() +
+  ggtitle("Linguistic Region")
+
+p3 <- ggplot(final_merged, aes(x = Income_Category)) + 
+  geom_bar() +
+  ggtitle("Rich Municipality")
+
+p4 <- ggplot(final_merged, aes(x = Change_Muslim_Cat)) + 
+  geom_bar() +
+  ggtitle("Categorical Change in Muslim Shares")
+
+p5 <- ggplot(final_merged, aes(x = Change_Arabs_Cat2)) + 
+  geom_bar() +
+  ggtitle("Categorical Change in Arab Shares")
+
+p6 <- ggplot(final_merged, aes(x = Change_MNA_Cat2)) + 
+  geom_bar() +
+  ggtitle("Categorical Change in NAM Shares")
+
+p7 <- ggplot(final_merged, aes(x = Change_MNA_NO_TURKS_Cat)) + 
+  geom_bar() +
+  ggtitle("Categorical Change in NAMET Shares")
+
+grid_figure <- gridExtra::grid.arrange(p1, p2, p3, p4, p5, p6, p7, nrow = 3, ncol = 3)
+
+
+
+```
+
+
+
+## 12.2 WLS and HC1 Main Specification: 
+
+**WLS Main Specification**
+```{r WLS Main Specification:}
+
+# Starting by running the WLS model of our main specification, pre-autocorrelation correction
+
+# Define weights to use
+wt <- 1 / lm(abs(FD_Muslims_Final2$residuals) ~ FD_Muslims_Final2$fitted.values)$fitted.values^2
+
+# Perform weighted least squares 
+WLS_main_specification <- lm(Yes_percent_change ~ Change_Muslim_Cat + 
+                               Change_NM_foreigners +  SVP_change_imputed + 
+                               Minaret_yes_percent + Muslim_share_10 + 
+                               NM_Foreigner_share_10 + Violent_offences + 
+                               Municipality_type + Income_Category, 
+                             data = final_merged, weights = wt)
+summary(WLS_main_specification)
+# Note that the model fit has improved, with the RSE going from over 5 to 1.3. 
+
+# Compare heteroskedasticity to original level.
+bptest(WLS_main_specification)
+# However, heteroskedasticity is still problematic, as per the Breusch-Pagan test, 
+# which p-value is well below 0.05. 
+
+```
+
+**HC1 Main Specification**
+```{r HC1 Main Specification}
+
+# Calculate HC1 standard errors
+robust_se <- vcovHC(FD_Muslims_Final2, type = "HC1")
+
+
+# Summarise the model with robust standard errors
+coeftest(FD_Muslims_Final2, vcov = robust_se)
+# Barely any difference with the original output. This suggests that heteroskedasticity
+# may not be an important issue, particularly when combined with the low impact of WLS.
+```
+
+
+
+## 12.3 Normality of Residuals 
+### 12.3.1 Initial 3 Muslim Models
+```{r Normality Initial 3 Muslim Models}
+
+# Set up the plotting area to handle 6 plots 
+par(mfrow = c(3, 2), mar = c(4, 4, 2, 1))
+
+# Vanilla Model
+mna_residuals <- resid(Corrected_FD_Muslims_Vanilla)
+qqnorm(mna_residuals, main = "Q-Q Plot: Vanilla Model")
+qqline(mna_residuals, col = "red")
+hist(mna_residuals, main = "Histogram: Vanilla Model Model", xlab = "Residuals", breaks = 30)
+
+# Main Specification Model with Time-Constant Controls but NO Time-Varying Ones
+arab_residuals <- resid(Corrected_FD_Muslims_Final2_simplified2)
+qqnorm(arab_residuals, main = "Q-Q Plot: Model 2")
+qqline(arab_residuals, col = "red")
+hist(arab_residuals, main = "Histogram: Model 2", xlab = "Residuals", breaks = 30)
+
+# Main Specification Model with Time-Constant Controls AND Time-Varying Ones
+main_spec_residuals <- resid(Corrected_FD_Muslims_Final2_simplified1)
+qqnorm(main_spec_residuals, main = "Q-Q Plot: Model 3")
+qqline(main_spec_residuals, col = "red")
+hist(main_spec_residuals, main = "Histogram: Model 3", xlab = "Residuals", breaks = 30)
+
+par(mfrow = c(1, 1))  
+
+
+```
+- Normality increases with the number of controls
+### 12.3.2 Figure for only the Main Specification and Muslim Sub-Groups
+```{r Qq-plot}
+# Qq-plot to assess normality of residuals.
+# Set up the plotting area to handle 8 plots 
+par(mfrow = c(2, 4), mar = c(4, 4, 2, 1))
+
+# Main Specification Model
+main_spec_residuals <- resid(Corrected_FD_Muslims_Final2)
+qqnorm(main_spec_residuals, main = "Q-Q Plot: Main Specification")
+qqline(main_spec_residuals, col = "red")
+hist(main_spec_residuals, main = "Histogram: Main Specification", xlab = "Residuals", breaks = 30)
+
+# Arab Model
+arab_residuals <- resid(Corrected_FD_Arabs)
+qqnorm(arab_residuals, main = "Q-Q Plot: Arab Model")
+qqline(arab_residuals, col = "red")
+hist(arab_residuals, main = "Histogram: Arab Model", xlab = "Residuals", breaks = 30)
+
+# Non-Arab Muslim Model
+mna_residuals <- resid(Corrected_FD_MNA)
+qqnorm(mna_residuals, main = "Q-Q Plot: Non-Arab Muslim Model")
+qqline(mna_residuals, col = "red")
+hist(mna_residuals, main = "Histogram: Non-Arab Muslim Model", xlab = "Residuals", breaks = 30)
+
+# Non-Arab Muslim Excluding Turks Model
+mna_no_turks_residuals <- resid(Corrected_FD_MNA_NO_TURKS)
+qqnorm(mna_no_turks_residuals, main = "Q-Q Plot: Non-Arab Muslim Excl. Turks")
+qqline(mna_no_turks_residuals, col = "red")
+hist(mna_no_turks_residuals, main = "Histogram: Non-Arab Muslim Excl. Turks",
+     xlab = "Residuals", breaks = 30)
+
+par(mfrow = c(1, 1))  
+```
+
+
+
+
+- We see that the addition of the lagged/baseline values in the main specification has a clear positive effect on the normality of the residuals.
+
+
+
+## 12.4 Linearity Assumption 
+
+
+### 12.4.1 Linearity Assumption for the Initial 3 Muslim Models 
+```{r Linearity Assumption for the Initial 3 Muslim Models}
+
+# Set up the plotting area  
+par(mfrow = c(2, 2))
+
+# Vanilla Model plot
+plot(Corrected_FD_Muslims_Vanilla$fitted.values, 
+     Corrected_FD_Muslims_Vanilla$residuals,
+     main = "Vanilla Model",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_Muslims_Vanilla$fitted.values, 
+             Corrected_FD_Muslims_Vanilla$residuals), col = "red")
+
+# Main Specification Model with Time-Constant Controls but NO Time-Varying Ones
+plot(Corrected_FD_Muslims_Final2_simplified2$fitted.values, 
+     Corrected_FD_Muslims_Final2_simplified2$residuals,
+     main = "Model 2",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_Muslims_Final2_simplified2$fitted.values, 
+             Corrected_FD_Muslims_Final2_simplified2$residuals), col = "red")
+
+# Main Specification Model with Time-Constant Controls AND Time-Varying Ones
+plot(Corrected_FD_Muslims_Final2_simplified1$fitted.values, 
+     Corrected_FD_Muslims_Final2_simplified1$residuals,
+     main = "Model 3",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_Muslims_Final2_simplified1$fitted.values, 
+             Corrected_FD_Muslims_Final2_simplified1$residuals), col = "red")
+
+```
+
+
+
+### 12.4.2 Linearity Assumption for Main Specificiation and Sub-Group Models
+```{r Linearity of the main specification and Sub-Groups}
+
+# Set up the plotting area 
+par(mfrow = c(2, 2))
+
+# Main specification plot
+plot(Corrected_FD_Muslims_Final2$fitted.values, Corrected_FD_Muslims_Final2$residuals,
+     main = "Main Specification",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_Muslims_Final2$fitted.values, 
+             Corrected_FD_Muslims_Final2$residuals), col = "red")
+
+# Arab Model plot
+plot(Corrected_FD_Arabs$fitted.values, Corrected_FD_Arabs$residuals,
+     main = "Arab Model",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_Arabs$fitted.values, 
+             Corrected_FD_Arabs$residuals), col = "red")
+
+# Non-Arab Muslim Model plot
+plot(Corrected_FD_MNA$fitted.values, Corrected_FD_MNA$residuals,
+     main = "Non-Arab Muslim Model",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_MNA$fitted.values, 
+             Corrected_FD_MNA$residuals), col = "red")
+
+# Non-Arab Muslim Excluding Turks Model plot
+plot(Corrected_FD_MNA_NO_TURKS$fitted.values, Corrected_FD_MNA_NO_TURKS$residuals,
+     main = "Non-Arab Muslim Excluding Turks Model",
+     xlab = "Fitted Values", ylab = "Residuals")
+lines(lowess(Corrected_FD_MNA_NO_TURKS$fitted.values, 
+             Corrected_FD_MNA_NO_TURKS$residuals), col = "red")
+
+# Reset the plotting layout
+par(mfrow = c(1, 1))
+
+
+```
+
+
+
+## 12.5 Main specification with Population Density:
+We add a control for changes in the population density, which could artificially
+affect exposure to out-groups without their population shares changing. This 
+is particularly likely for changes in population density due to the rural exodus.
+Alternatively, it could happen due to the urbanization of previously semi-urban/rural
+neighbourhoods.
+
+```{r Model 9 (Population Density)}
+FD_Muslims_Cat_9 <- lm(Yes_percent_change ~ Change_Muslim_Cat + Change_NM_foreigners + 
+                          SVP_change_imputed + Minaret_yes_percent
+                        + Muslim_share_10 + NM_Foreigner_share_10 + Violent_offences
+                        + Municipality_type + Income_Category + Pop_density_change_in_hundreds,
+                       data = final_merged)
+summary(FD_Muslims_Cat_9)
+```
+Including population density makes the coefficient for decreasing Muslim shares 
+less significant. This may be due to population density falling as Muslim shares 
+decrease.
+
+We test whether this hypothesis holds:
+```{r Test Population Density}
+anova_model <- aov(Pop_density_change_in_hundreds ~ Change_Muslim_Cat, data = final_merged)
+summary(anova_model)
+# The change in Muslim population significantly affects population density 
+# (p < 0.001), indicating large differences in population density changes across 
+# Muslim share change categories.
+
+# To investigate whether this holds for both directions of share changes, 
+# we conduct a Tukey test: 
+TukeyHSD(anova_model)
+```
+Increases in the Muslim population share are associated with significant increases
+in population density, and similarly, *high* decreases in the share also affect
+population density, but to a lesser extent.
+
+To reduce the risk of controlling for the effect of the change in Muslims through 
+the control for the change in population density, we remove this latter variable.
+
+
+
+
+
+
+## 12.6 Main specification with Baseline SVP Support:
+This baseline SVP support is not expected to be influenced by baseline support, 
+with only present partisanship affecting votes, not past attitudes. For robustness, 
+we nonetheless verify this hypothesis: 
+```{r Model 10 (Baseline SVP Support)}
+FD_Muslims_Cat_10 <- lm(Yes_percent_change ~ Change_Muslim_Cat + Change_NM_foreigners + 
+                          SVP_change_imputed + Minaret_yes_percent
+                        + Muslim_share_10 + NM_Foreigner_share_10 + Violent_offences
+                        + Municipality_type + Income_Category + Imputed_SVP_percent_07,
+                       data = final_merged)
+summary(FD_Muslims_Cat_10)
+
+anova_SVP_baseline <- aov(Imputed_SVP_percent_07 ~ NM_Foreigner_share_10, 
+                          data = final_merged)
+summary(anova_SVP_baseline)
+
+```
+The initial share of NM foreigners significantly affects the initial share 
+of SVP support. Similarly to above, we decide to only keep one variable.
+Given the higher relevance (foreigner presence affecting SVP support 
+rather than the reverse) and significance of baseline NM foreigner shares, 
+we retain this variable and discard the initial SVP support.
+
+
+
+## 12.7 Geographic Distribution of Municipalities and Migrations
+**By Linguistic Region**
+```{r Geographic Distribution of Municipalities and Migrations}
+
+# Calculate the total number of municipalities in each region
+total_muni_per_region <- table(final_merged$Linguistic_Region)
+
+# Calculate the number of municipalities with no change in Arabs and MNA
+no_change_Arab_shares <- final_merged$Change_Arabs_Cat2 %in% c("No Change")
+no_change_MNA_shares <- final_merged$Change_MNA_Cat2 %in% c("No Change")
+no_change_counts_arabs <- table(final_merged$Linguistic_Region[no_change_Arab_shares])
+no_change_counts_MNA <- table(final_merged$Linguistic_Region[no_change_MNA_shares])
+
+# Calculate the number of municipalities with increases in Arabs and MNA
+increase_Arab_shares <- final_merged$Change_Arabs_Cat2 %in% c("High Increase", "Low Increase")
+increase_MNA_shares <- final_merged$Change_MNA_Cat2 %in% c("High Increase", "Low Increase")
+increase_counts_arabs <- table(final_merged$Linguistic_Region[increase_Arab_shares])
+increase_counts_MNA <- table(final_merged$Linguistic_Region[increase_MNA_shares])
+
+# Calculate the number of municipalities with decreases in Arabs and MNA
+decrease_Arab_shares <- final_merged$Change_Arabs_Cat2 %in% c("Low Decrease", "High Decrease")
+decrease_MNA_shares <- final_merged$Change_MNA_Cat2 %in% c("Low Decrease", "High Decrease")
+decrease_counts_arabs <- table(final_merged$Linguistic_Region[decrease_Arab_shares])
+decrease_counts_MNA <- table(final_merged$Linguistic_Region[decrease_MNA_shares])
+
+# Calculate proportions of all municipalities in a region which correspond to 
+# constant shares of one of the sub-groups
+prop_no_change_arabs <- no_change_counts_arabs / total_muni_per_region
+prop_no_change_MNA <- no_change_counts_MNA / total_muni_per_region 
+
+# Calculate proportions of all municipalities in a region which correspond to an 
+# increase in the shares of one of the sub-groups
+prop_increase_arabs <- increase_counts_arabs / total_muni_per_region
+prop_increase_MNA <- increase_counts_MNA / total_muni_per_region
+
+# Calculate proportions of all municipalities in a region which correspond to a 
+# decrease in the shares of one of the sub-groups
+prop_decrease_arabs <- decrease_counts_arabs / total_muni_per_region
+prop_decrease_MNA <- decrease_counts_MNA / total_muni_per_region
+
+# Combine into a data frame for better visualisation
+
+# For constant shares
+data.frame(Region = names(total_muni_per_region),
+           Total_Municipalities = as.vector(total_muni_per_region),
+           No_Change_Arabs = as.vector(no_change_counts_arabs),
+           No_Change_MNA = as.vector(no_change_counts_MNA),
+           Prop_No_Change_Arabs = as.vector(prop_no_change_arabs),
+           Prop_No_Change_MNA = as.vector(prop_no_change_MNA))
+
+# For increasing shares
+data.frame(Region = names(total_muni_per_region),
+           Total_Municipalities = as.vector(total_muni_per_region),
+           Increase_Arabs = as.vector(increase_counts_arabs),
+           Increase_MNA = as.vector(increase_counts_MNA),
+           Prop_Increase_Arabs = as.vector(prop_increase_arabs),
+           Prop_Increase_MNA = as.vector(prop_increase_MNA))
+
+# For decreasing shares
+data.frame(Region = names(total_muni_per_region),
+  Total_Municipalities = as.vector(total_muni_per_region),
+  Decrease_Arabs = as.vector(decrease_counts_arabs),
+  Decrease_MNA = as.vector(decrease_counts_MNA),
+  Prop_Decrease_Arabs = as.vector(prop_decrease_arabs),
+  Prop_Decrease_MNA = as.vector(prop_decrease_MNA))
+
+
+# If migration preferences or patterns were identical, we would expect a uniform 
+# distribution across regions. The scale of migrations might be different, 
+# but should remain constant relative to each other. 
+
+```
+
+**By Municipality Type**
+```{r Number of Municipalities of Each Type}
+municipality_counts <- table(final_merged$Municipality_type)
+print(municipality_counts)
+prop.table(municipality_counts) * 100
+```
+
+*Percentage of Constant Muslim Shares by Municipality Type*
+```{r Percentage of Constant Muslim Shares by Municipality Type}
+constant_muslim_shares <- final_merged$Change_Muslim_Cat %in% c("No Change")
+table(final_merged$Municipality_type[constant_muslim_shares])
+constant_counts <- table(final_merged$Municipality_type[constant_muslim_shares])
+prop.table(constant_counts)*100 
+```
+
+
+
+
+
+## 12.8 Migration flows by Muslim countries
+
+```{r Investigation Datasets}
+# Explaining the difference in effects between Arabs and MNA Muslims: 
+
+# Deliminating both groups in the 2021 data
+data_arab21 <- data_21[, arab_countries]
+data_muslim21 <- data_21[, muslim_countries]
+
+# Find variables in data_muslim but not in data_arab
+MNA_vars <- setdiff(names(data_muslim21), names(data_arab21))
+
+# Create data set corresponding to those variables
+data_MNA21 <- data_muslim21[, MNA_vars]
+
+
+# Repeat for the 2010 data
+data_arab10 <- data_10[, arab_countries]
+data_muslim10 <- data_10[, muslim_countries]
+
+# Create data set corresponding to those variables
+data_MNA10 <- data_muslim10[, MNA_vars]
+
+
+# We now clean the data sets
+
+# For data_arab
+data_arab21 <- data_arab21[1, , drop = FALSE]  # Keep only the first row
+data_arab21 <- t(data_arab21)  # Transpose the row into a column
+colnames(data_arab21) <- "arab_immigrants_21"  # Rename the column
+data_arab10 <- data_arab10[1, , drop = FALSE]  # idem
+data_arab10 <- t(data_arab10) # idem
+colnames(data_arab10) <- "arab_immigrants_10"
+
+
+# For data_MNA
+data_MNA21<- data_MNA21[1, , drop = FALSE]  # Keep only the first row
+data_MNA21 <- t(data_MNA21)  # Transpose the row into a column
+colnames(data_MNA21) <- "MNA_immigrants_21"  # Rename the column
+data_MNA10 <- data_MNA10[1, , drop = FALSE]  # idem
+data_MNA10 <- t(data_MNA10)  # idem
+colnames(data_MNA10) <- "MNA_immigrants_10"  # idem
+
+
+# Calculate the change in MNA and Arab immigrants between 2021 and 2010
+change_arab_immigrants <- data_arab21 - data_arab10
+change_MNA_immigrants <- data_MNA21 - data_MNA10
+
+# Merge the data into a single dataset for Arabs and MNA Muslims
+Investigation_data_arab <- data.frame(arab_immigrants_10 = data_arab10,
+                                      arab_immigrants_21 = data_arab21,
+                                      change_arab_immigrants)
+
+Investigation_data_MNA <- data.frame(MNA_immigrants_10 = data_MNA10,
+                                     MNA_immigrants_21 = data_MNA21,
+                                     change_MNA_immigrants)
+
+# Rename the change column for clarity :
+colnames(Investigation_data_arab)[colnames(Investigation_data_arab)
+                                  == "arab_immigrants_21.1"] <- "Change_arab_immigrants"
+colnames(Investigation_data_MNA)[colnames(Investigation_data_MNA)
+                                 == "MNA_immigrants_21.1"] <- "Change_MNA_immigrants"
+
+# Calculate the share of total change attributed to each country - Arabs
+total_absolute_change_arab <- sum(abs(Investigation_data_arab$Change_arab_immigrants))
+percentage_arab <- (abs(Investigation_data_arab$Change_arab_immigrants) /
+                      total_absolute_change_arab) * 100
+Investigation_data_arab$Percentage <- percentage_arab
+Investigation_data_arab$Percentage <- round(percentage_arab, 1) # round percentage
+
+# Calculate the share of total change attributed to each country - MNA
+total_absolute_change_MNA <- sum(abs(Investigation_data_MNA$Change_MNA_immigrants))
+percentage_MNA <- (abs(Investigation_data_MNA$Change_MNA_immigrants) /
+                     total_absolute_change_MNA) * 100
+Investigation_data_MNA$Percentage <- percentage_MNA
+Investigation_data_MNA$Percentage <- round(percentage_MNA, 1) # round percentage
+
+
+# Compute the total of all observations in each variable/column:
+Total_arab <- colSums(Investigation_data_arab, na.rm = TRUE)
+Investigation_data_arab <- rbind(Investigation_data_arab, Total_arab = Total_arab)
+Total_MNA <- colSums(Investigation_data_MNA, na.rm = TRUE)
+Investigation_data_MNA <- rbind(Investigation_data_MNA, Total_MNA = Total_MNA)
+
+
+# Identify rows with negative values in the 'Change_arab_immigrants' column
+Investigation_data_arab[Investigation_data_arab$Change_arab_immigrants < 0, ]
+Investigation_data_MNA[Investigation_data_MNA$Change_MNA_immigrants < 0, ]
+# Total of all negative changes = -3142 immigrants
+(3071/3142)*100 # Turkey represents 97.74% of them by itself
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Part 13:  Maps to Visualise Data Across Switzerland
+
+Note: this section is located at the bottom of the Markdown because it requires reinitialising the final_merged data set to avoid 
+NAs in the 6 municipalities which were previously removed. This ensures that all 
+municipalities can be mapped. 
+
+
+## 13.1: Set Up for the Maps 
+### Reloading the Data including all Municipalities and creating the necessary objects
+```{r Data Visualisation}
+
+
+# List of data sets to merge
+datasets_list <- list(merged_data_final24, Referendum_data, income_merged, 
+                      social_help_merged, Pop_density_merged, SVP_merged)
+
+# Use Reduce to merge all datasets on 'bfs_nr_new'
+final_merged <- Reduce(function(x, y) merge(x, y, by = "bfs_nr_new", 
+                                            all = TRUE), datasets_list)
+
+
+
+
+
+# Define thresholds for "No Change" as less than 0.05pp. variation in the shares
+no_change_lower_bound <- -0.05
+no_change_upper_bound <- 0.05
+
+# Calculate medians for the changes outside the "No Change" category
+negative_changes <- final_merged$Change_Muslims[final_merged$Change_Muslims < 
+                                                  no_change_lower_bound]
+positive_changes <- final_merged$Change_Muslims[final_merged$Change_Muslims > 
+                                                  no_change_upper_bound]
+
+median_negative_change <- median(negative_changes, na.rm = TRUE)
+median_positive_change <- median(positive_changes, na.rm = TRUE)
+
+
+# Recode the changes into a categorical variable
+final_merged <- final_merged %>%
+  mutate(Change_Muslim_Cat = case_when(
+    Change_Muslims < median_negative_change ~ "High Decrease",
+    Change_Muslims >= median_negative_change & Change_Muslims < 
+      no_change_lower_bound ~ "Low Decrease",
+    Change_Muslims >= no_change_lower_bound & Change_Muslims <= 
+      no_change_upper_bound ~ "No Change",
+    Change_Muslims > no_change_upper_bound & Change_Muslims <= 
+      median_positive_change ~ "Low Increase",
+    Change_Muslims > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor, set "No Change" as reference category, and reorder other levels
+final_merged$Change_Muslim_Cat <- factor(final_merged$Change_Muslim_Cat, 
+                                         levels = c("No Change", "High Increase",
+                                                    "Low Increase", "Low Decrease",
+                                                    "High Decrease"))
+
+
+
+
+# 1) Set up for the Arab Model
+
+# Find the level thresholds
+negative_changes_arabs <- final_merged$Change_arabs[final_merged$Change_arabs < 
+                                                      no_change_lower_bound]
+positive_changes_arabs <- final_merged$Change_arabs[final_merged$Change_arabs > 
+                                                      no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_arabs, na.rm = TRUE)
+median_positive_change <- median(positive_changes_arabs, na.rm = TRUE)
+
+final_merged <- final_merged %>%
+  mutate(Change_Arabs_Cat2 = case_when(
+    Change_arabs < median_negative_change ~ "High Decrease",
+    Change_arabs >= median_negative_change & Change_arabs < no_change_lower_bound ~ 
+      "Low Decrease",
+    Change_arabs >= no_change_lower_bound & Change_arabs <= no_change_upper_bound ~ 
+      "No Change",
+    Change_arabs > no_change_upper_bound & Change_arabs <= median_positive_change ~ 
+      "Low Increase",
+    Change_arabs > median_positive_change ~ "High Increase"
+  ))
+
+final_merged$Change_Arabs_Cat2 <- factor(final_merged$Change_Arabs_Cat2, 
+                                         levels = c("No Change", "High Increase",
+                                                    "Low Increase", "Low Decrease",
+                                                    "High Decrease"))
+
+
+
+# 2) Set up for the MNA Model
+
+# Find the level thresholds
+negative_changes_MNA <- final_merged$Change_MNA[final_merged$Change_MNA < 
+                                                  no_change_lower_bound]
+positive_changes_MNA <- final_merged$Change_MNA[final_merged$Change_MNA > 
+                                                  no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_MNA, na.rm = TRUE)
+median_positive_change <- median(positive_changes_MNA, na.rm = TRUE)
+
+final_merged <- final_merged %>%
+  mutate(Change_MNA_Cat2 = case_when(
+    Change_MNA < median_negative_change ~ "High Decrease",
+    Change_MNA >= median_negative_change & Change_MNA < no_change_lower_bound ~ 
+      "Low Decrease",
+    Change_MNA >= no_change_lower_bound & Change_MNA <= no_change_upper_bound ~ 
+      "No Change",
+    Change_MNA > no_change_upper_bound & Change_MNA <= median_positive_change ~ 
+      "Low Increase",
+    Change_MNA > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor,  set "No Change" as the reference category, reorder
+final_merged$Change_MNA_Cat2 <- factor(final_merged$Change_MNA_Cat2, 
+                                        levels = c("No Change", "High Increase",
+                                                   "Low Increase", "Low Decrease",
+                                                   "High Decrease"))
+
+
+
+
+# 3) Set up for the MNA without Turks Model
+
+# Create the necessary variables
+final_merged$Change_MNA_NO_TURKS <- final_merged$Change_MNA - 
+  final_merged$Change_turkish
+final_merged$MNA_NO_TURKS_share_10 <- final_merged$MNA_share_10 - 
+  final_merged$Turkish_share_10
+
+# Find the level thresholds
+negative_changes_MNA_NO_TURKS <- 
+  final_merged$Change_MNA_NO_TURKS[final_merged$Change_MNA_NO_TURKS < 
+                                     no_change_lower_bound]
+positive_changes_MNA_NO_TURKS <- 
+  final_merged$Change_MNA_NO_TURKS[final_merged$Change_MNA_NO_TURKS > 
+                                     no_change_upper_bound]
+
+median_negative_change <- median(negative_changes_MNA_NO_TURKS)
+median_positive_change <- median(positive_changes_MNA_NO_TURKS)
+
+
+# Re-code the MNA no Turk changes into a categorical variable with 5 categories
+final_merged <- final_merged %>%
+  mutate(Change_MNA_NO_TURKS_Cat = case_when(
+    Change_MNA_NO_TURKS < median_negative_change ~ "High Decrease",
+    Change_MNA_NO_TURKS >= median_negative_change & Change_MNA_NO_TURKS < 
+      no_change_lower_bound ~ "Low Decrease",
+    Change_MNA_NO_TURKS >= no_change_lower_bound & Change_MNA_NO_TURKS <= 
+      no_change_upper_bound ~ "No Change",
+    Change_MNA_NO_TURKS > no_change_upper_bound & Change_MNA_NO_TURKS <= 
+      median_positive_change ~ "Low Increase",
+    Change_MNA_NO_TURKS > median_positive_change ~ "High Increase"
+  ))
+
+# Convert to factor,  set "No Change" as the reference category, reorder
+final_merged$Change_MNA_NO_TURKS_Cat <- factor(final_merged$Change_MNA_NO_TURKS_Cat, 
+                                      levels = c("No Change", "High Increase",
+                                                 "Low Increase", "Low Decrease",
+                                                 "High Decrease"))
+
+
+
+
+
+
+``` 
+
+### Setting up the GIS Data
+```{r}
+
+test <- read_sf("/Users/alexandredore/Desktop/Dissertation/ALL data/01_INST/GesamtflÑche_gf/K4_polg20240101_gf")
+
+# Merge attributes from merged_sf into test based on matching municipality IDs
+full_data <- merge(test, final_merged, by.x = "id", by.y = "bfs_nr_new", all.x = TRUE)
+
+
+```
+
+## 13.2:Mapping
+### 13.2.1: Localising Outliers in the Main Specification
+```{r Locating outliers}
+# Subset the relevant columns for outliers
+outlier_main_details <- full_data[outliers_Final2, c("Municipality_type", "Linguistic_Region")]
+ 
+# Calculate frequency of each type and region among outliers
+table(outlier_main_details$Municipality_type)
+table(outlier_main_details$Linguistic_Region)
+
+
+
+# Assuming 'full_data' contains a geometry column and 'Municipality_type'
+# Add a column for coloring purposes
+full_data$plot_color <- ifelse(row.names(full_data) %in% outliers_Final2, 
+                               as.character(full_data$Municipality_type), 
+                               "Non-Outlier")
+
+# Plotting the entire dataset with different colors for municipality types among outliers
+ggplot(data = full_data) +
+  geom_sf(aes(fill = plot_color), size = 0.1, color = NA) +
+  scale_fill_manual(values = c("Urban" = "red", "Semi-Urban" = "grey50",
+                               "Rural" = "peachpuff2", "Non-Outlier" = "grey90"),
+                    name = "Municipality Type") +
+  labs(title = "Outliers by Municipality Type") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+``` 
+
+
+
+
+
+
+
+
+
+
+
+
+### 13.2.2: Mapping the Change in Islamophobic Referendum Support 
+```{r Change in Referendum Support}
+
+# Calculate the 10th and 90th percentiles for Yes_percent_change
+percentile_10 <- quantile(full_data$Yes_percent_change, 0.1, na.rm = TRUE) 
+percentile_90 <- quantile(full_data$Yes_percent_change, 0.9, na.rm = TRUE)
+
+# Adjust color intensity based on the 10th and 90th percentiles
+max_abs_change <- max(abs(c(percentile_10, percentile_90)))
+
+# Create the plot
+ggplot(data = full_data) +
+geom_sf(aes(fill = Yes_percent_change), size = 0.1, color = NA) + 
+  scale_fill_gradient2(name = "Change in Support",
+low = "forestgreen", mid = "lightgrey", high = "red", midpoint = 0, # No change point
+limits = c(-max_abs_change, max_abs_change), oob = scales::oob_squish) +
+labs(title = "Change in Islamophobia/Referendum Support Across Swiss Municipalities",
+subtitle = "Colors reflect changes within the 10th to 90th percentiles") +
+theme_minimal() + theme(legend.position = "right")
+
+```
+
+
+
+
+# End of the Code
