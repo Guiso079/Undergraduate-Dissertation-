@@ -1,9 +1,11 @@
 # Undergraduate-Dissertation-
 Code for my Undergraduate Dissertation in the BSc Philosophy, Politics, and Economics with Social Data Science at UCL.
+
 The first file consists simply of the raw code without output, while the second and third include the code output in the form of an HTML and PDF document.
 
 
 **Dissertation Title**: A rising Tide? The Effects of Municipal Muslim Population Shares on Local Islamophobia in Switzerland.
+
 **Supervisor**: Dr Moritz Marbach
 
 **Abstract of the Dissertation**:
