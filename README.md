@@ -1,4 +1,4 @@
-## Undergraduate-Dissertation-
+## Undergraduate Dissertation 
 This repository contains the code for my Undergraduate Dissertation in the BSc Philosophy, Politics, and Economics with Social Data Science at UCL.
 
 The first file contains the raw code without any output. The second and third files are enhanced with the code output, provided in HTML and PDF formats, respectively.
